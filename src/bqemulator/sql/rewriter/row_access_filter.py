@@ -16,11 +16,16 @@ time-travel rewriter and INFORMATION_SCHEMA expander). For each
 
 The pass short-circuits when the catalog has zero policies — Phase
 7's hot path stays cheap for every project that hasn't enabled
-RAP. See ADR 0018 for the full design and matching rules.
+RAP. When the caller also supplies ``is_engine_view``, views DuckDB
+already holds natively (SQL ``CREATE VIEW`` outputs) are left as
+plain references in that case: with no policy to enforce, inlining
+them only bloats the SQL every later pass has to parse. See ADR 0018
+for the full design and matching rules.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import sqlglot
@@ -52,6 +57,7 @@ def rewrite_for_row_access(
     project_id: str,
     caller: CallerIdentity,
     catalog: CatalogRepository,
+    is_engine_view: Callable[[str, str, str], bool] | None = None,
 ) -> str:
     """Apply caller-bound row access policies to ``bq_sql``.
 
@@ -65,6 +71,14 @@ def rewrite_for_row_access(
     the number of tables in the SQL and pays one cached catalog
     lookup per reference, so the cost is dominated by the parse — the
     same cost the time-travel rewriter already pays.
+
+    ``is_engine_view(project, dataset, table)`` reports whether DuckDB
+    holds the view natively. When it is given and the catalog has no
+    row access policies at all, such views are not expanded: DuckDB
+    resolves them itself, and inlining a deep view stack (e.g. dbt
+    models materialized as views) multiplies the SQL the translator
+    must process. Views that exist only in the catalog (REST
+    ``tables.insert`` with ``view.query``) are always expanded.
 
     DML write *targets* (the destination table of INSERT / UPDATE /
     DELETE / MERGE) are NEVER rewritten — wrapping them in a subquery
@@ -85,6 +99,9 @@ def rewrite_for_row_access(
         catalog=catalog,
         matcher=matcher,
         write_targets=write_targets,
+        is_engine_view=(
+            is_engine_view if not catalog.list_all_row_access_policies() else None
+        ),
     )
 
     modified = rewriter.rewrite_tree(tree, depth=0)
@@ -166,11 +183,15 @@ class _Rewriter:
         catalog: CatalogRepository,
         matcher: GranteeMatcher,
         write_targets: set[int] | None = None,
+        is_engine_view: Callable[[str, str, str], bool] | None = None,
     ) -> None:
         self._project_id = project_id
         self._catalog = catalog
         self._matcher = matcher
         self._write_targets: set[int] = write_targets or set()
+        # Set only when the catalog has no policies: views DuckDB holds
+        # natively are then left unexpanded (see rewrite_for_row_access).
+        self._is_engine_view = is_engine_view
         # Cache policy lookups so a query that joins the same table to
         # itself does the catalog lookup once. The cache is keyed on
         # (project, dataset, table) and stores the *applicable* policy
@@ -232,6 +253,8 @@ class _Rewriter:
         # 5 ``authz_view_*`` conformance fixtures whose recordings
         # confirmed BQ's behaviour empirically.
         if meta is not None and meta.table_type == "VIEW" and meta.view_query:
+            if self._is_engine_view is not None and self._is_engine_view(proj, dataset, table):
+                return False
             return self._expand_view(
                 node,
                 view_project=proj,

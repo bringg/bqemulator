@@ -32,12 +32,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from bqemulator.domain.errors import ValidationError
 from bqemulator.domain.result import Err, Ok
 from bqemulator.sql.catalog_schema import build_catalog_schema
 from bqemulator.sql.rewriter.information_schema import expand_information_schema
 from bqemulator.sql.rewriter.row_access_filter import rewrite_for_row_access
 from bqemulator.sql.rewriter.unnest_offset import rewrite_unnest_offset
 from bqemulator.sql.rewriter.wildcard_expander import expand_wildcard_tables
+from bqemulator.storage.sql_identifiers import schema_name
 from bqemulator.versioning.materialized_views import MaterializedViewManager
 from bqemulator.versioning.time_travel import rewrite_for_system_time
 
@@ -105,6 +107,15 @@ def _referenced_materialized_views(
         yield ref
 
 
+def _is_engine_view(ctx: AppContext, proj: str, dataset: str, table: str) -> bool:
+    """Return True iff DuckDB holds ``proj.dataset.table`` as a native view."""
+    try:
+        schema = schema_name(proj, dataset)
+    except ValidationError:
+        return False
+    return ctx.engine.has_view(schema, table)
+
+
 async def rewrite_and_translate_statement(
     bq_sql: str,
     *,
@@ -145,6 +156,7 @@ async def rewrite_and_translate_statement(
         project_id=project_id,
         caller=caller,
         catalog=ctx.catalog,
+        is_engine_view=lambda proj, dataset, table: _is_engine_view(ctx, proj, dataset, table),
     )
     bq_sql = expand_information_schema(bq_sql, project_id, ctx.catalog)
     bq_sql = rewrite_unnest_offset(bq_sql)

@@ -84,12 +84,18 @@ def _rewrite_ignore_nulls(tree: exp.Expression) -> bool:
 def _filter_target(agg_operand: exp.Expression) -> exp.Expression:
     """Pull the value-expression out of an aggregate's inner operand.
 
-    The aggregate may wrap its operand in an :class:`exp.Order` (when an
-    ``ORDER BY`` follows the value). We need the bare value so the
-    ``IS NOT NULL`` filter matches what the aggregate is summing.
+    The aggregate may wrap its operand in an :class:`exp.Limit` (``LIMIT
+    n``), an :class:`exp.Order` (``ORDER BY``) and an
+    :class:`exp.Distinct` (``DISTINCT``), outermost first. We need the
+    bare value so the ``IS NOT NULL`` filter matches what the aggregate
+    is collecting.
     """
+    if isinstance(agg_operand, exp.Limit):
+        agg_operand = agg_operand.this
     if isinstance(agg_operand, exp.Order):
-        return agg_operand.this
+        agg_operand = agg_operand.this
+    if isinstance(agg_operand, exp.Distinct) and len(agg_operand.expressions) == 1:
+        agg_operand = agg_operand.expressions[0]
     return agg_operand
 
 
@@ -105,12 +111,20 @@ def _rewrite_array_agg_limit(tree: exp.Expression) -> bool:
         # Unwrap the Limit so the inner agg sees only the Order.
         inner = operand.this
         limit_expr = operand.expression
-        clean_agg = exp.ArrayAgg(this=inner.copy())
+        clean_agg: exp.Expression = exp.ArrayAgg(this=inner.copy())
+        # An IGNORE NULLS rewrite already wrapped this aggregate in a
+        # FILTER; keep the filter on the aggregate, inside the slice, so
+        # nulls are dropped before the first ``n`` are taken.
+        target: exp.Expression = node
+        parent = node.parent
+        if isinstance(parent, exp.Filter) and parent.this is node:
+            clean_agg = exp.Filter(this=clean_agg, expression=parent.expression.copy())
+            target = parent
         replacement = exp.Anonymous(
             this="ARRAY_SLICE",
             expressions=[clean_agg, exp.Literal.number(1), limit_expr.copy()],
         )
-        node.replace(replacement)
+        target.replace(replacement)
         modified = True
     return modified
 

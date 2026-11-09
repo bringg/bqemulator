@@ -18,6 +18,7 @@ import pyarrow as pa
 
 from bqemulator.catalog.ddl_sync import (
     assert_drop_schema_allowed,
+    sync_altered_table,
     sync_created_schema,
     sync_created_table,
     sync_created_view,
@@ -337,6 +338,7 @@ async def execute_query_job(
     *,
     use_cache: bool = True,  # noqa: ARG001 — reserved for future cache integration
     caller: CallerIdentity | None = None,
+    table_definitions: dict[str, Any] | None = None,
 ) -> JobMeta:
     """Execute a query job and store the result.
 
@@ -351,7 +353,21 @@ async def execute_query_job(
     rewriter. The default falls back to the anonymous identity (which
     matches no user-defined grantee), so legacy callers that haven't
     been updated keep working.
+
+    ``table_definitions`` is the query's ``configuration.query.tableDefinitions``
+    (query-scoped external tables). Each one is exposed as a temp view for
+    the duration of the job.
     """
+    if table_definitions:
+        bq_sql, views = _register_external_tables(job_id, bq_sql, table_definitions, ctx)
+        try:
+            return await execute_query_job(
+                project_id, job_id, bq_sql, query_params, ctx, caller=caller
+            )
+        finally:
+            for view in views:
+                ctx.engine.execute(f'DROP VIEW IF EXISTS "{view}"')
+
     now = ctx.clock.now()
     script = _parse_script_or_raise(bq_sql)
     is_scripted = len(script.statements) != 1 or not isinstance(
@@ -703,7 +719,9 @@ async def _run_query_body(
     also auto-registers a missing dataset as a fallback). It then syncs
     ``DROP TABLE/VIEW/SCHEMA`` by removing the dropped object from the
     catalog (``sync_dropped_object``) so the relation or dataset
-    disappears from those same surfaces, matching BigQuery.
+    disappears from those same surfaces, matching BigQuery. A
+    column-level ``ALTER TABLE`` refreshes the table's catalog schema
+    (``sync_altered_table``).
     """
     if is_scripted:
         interpreter = ScriptInterpreter(ctx, project_id, caller=effective_caller)
@@ -719,6 +737,7 @@ async def _run_query_body(
     sync_created_table(bq_sql, project_id, ctx)
     sync_created_view(bq_sql, project_id, ctx)
     sync_dropped_object(bq_sql, project_id, ctx)
+    sync_altered_table(bq_sql, project_id, ctx)
     return arrow_table
 
 
@@ -897,7 +916,7 @@ async def _run_single_sql(
         # domain error that must be shaped by translate_runtime_error.
         duckdb_sql = rewrite_table_refs(translated_sql, project_id)
         duckdb_sql, param_values = bind_parameters(duckdb_sql, query_params)
-        return ctx.engine.fetch_arrow(duckdb_sql, param_values or None)
+        return await ctx.engine.fetch_arrow_off_loop(duckdb_sql, param_values or None)
     except DomainError as exc:
         # ADR 0022 §3: pre-execution domain errors (RAP denials,
         # malformed-id ValidationErrors from the SQL pipeline) are
@@ -1653,6 +1672,75 @@ def _resolve_uri(uri: str, ctx: AppContext) -> str:
     if uri.startswith("file://"):
         return uri[7:]
     return uri
+
+
+_EXTERNAL_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _register_external_tables(
+    job_id: str,
+    bq_sql: str,
+    table_definitions: dict[str, Any],
+    ctx: AppContext,
+) -> tuple[str, list[str]]:
+    """Expose ``tableDefinitions`` entries as DuckDB views over their ``sourceUris``.
+
+    Each view gets a per-job name so concurrent jobs reusing the same
+    definition name don't collide, and bare references to the definition
+    name in ``bq_sql`` are rewritten to it. The views are regular, not
+    ``TEMP``: the query runs on the engine's query cursor, which does not
+    see the main connection's temp objects. Only NEWLINE_DELIMITED_JSON
+    with an explicit schema is supported.
+    """
+    from bqemulator.storage.type_map import bq_schema_to_duckdb_columns
+
+    # Known limit: the rename is a regex over bare identifiers, so a string
+    # literal spelling the definition name is renamed too. A sqlglot Table
+    # rewrite would avoid that if it ever matters.
+    job_tag = re.sub(r"\W", "_", job_id)
+    statements: list[tuple[str, str, str]] = []
+    for name, definition in table_definitions.items():
+        if not _EXTERNAL_TABLE_NAME_RE.match(name):
+            raise InvalidQueryError(f"Invalid external table name {name!r}")
+        source_format = definition.get("sourceFormat", "CSV")
+        if source_format != "NEWLINE_DELIMITED_JSON":
+            raise UnsupportedFeatureError(
+                f"External table format {source_format} is not supported",
+            )
+        paths = [_resolve_uri(uri, ctx) for uri in definition.get("sourceUris", [])]
+        for path in paths:
+            _validate_local_path(path)
+        columns = bq_schema_to_duckdb_columns(definition["schema"]["fields"])
+        columns_sql = ", ".join(
+            "'{}': '{}'".format(col.replace("'", "''"), dtype.replace("'", "''"))
+            for col, dtype in columns
+        )
+        compression = "gzip" if definition.get("compression") == "GZIP" else "auto_detect"
+        view = f"_bqemu_ext_{job_tag}_{name}"
+        create_sql = (
+            f'CREATE OR REPLACE VIEW "{view}" AS SELECT * FROM read_json('
+            f"[{', '.join(repr(p) for p in paths)}], format='newline_delimited', "
+            f"compression='{compression}', columns={{{columns_sql}}})"
+        )
+        statements.append((name, view, create_sql))
+
+    views: list[str] = []
+    try:
+        for name, view, create_sql in statements:
+            ctx.engine.execute(create_sql)
+            views.append(view)
+            bq_sql = re.sub(rf"(?<![\w.`]){name}(?![\w`])", view, bq_sql)
+    except Exception as exc:
+        import duckdb
+
+        for view in views:
+            ctx.engine.execute(f'DROP VIEW IF EXISTS "{view}"')
+        # Missing / unreadable source files fail the job (as BigQuery does)
+        # instead of surfacing as a 500 that clients retry forever.
+        if isinstance(exc, duckdb.IOException):
+            raise InvalidQueryError(f"External table source: {exc}") from exc
+        raise
+    return bq_sql, views
 
 
 def _validate_local_path(path: str) -> None:

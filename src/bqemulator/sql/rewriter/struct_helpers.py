@@ -33,6 +33,19 @@ transpile unchanged.
 Named structs (``STRUCT(value AS field)``) are left alone — their
 explicit field names should survive the transpile as DuckDB struct
 literals (``{'field': value}``).
+
+An unaliased field that is a column reference or field path is *not*
+anonymous in BigQuery: ``STRUCT(rating_id, t.rating)`` names its
+fields ``rating_id`` and ``rating`` — the last path component, the
+same rule a ``SELECT`` list uses for an implicit alias. Turning such a
+struct into ``ROW(...)`` drops those names, so a later
+``s.rating`` / ``UNNEST(arr) AS r … r.rating`` fails with
+``struct_extract with a string key cannot be used on an unnamed
+struct``. When every unaliased child carries an inferable name, the
+rewrite therefore makes the names explicit (``STRUCT(rating_id AS
+rating_id, t.rating AS rating)``) instead of emitting ``ROW``. Inside
+``INSERT`` / ``MERGE`` and set operations BigQuery binds struct fields
+by position, so those keep the ``ROW`` form.
 """
 
 from __future__ import annotations
@@ -68,12 +81,17 @@ def _rewrite_positional_structs(tree: exp.Expression) -> bool:
 
     A struct is positional iff every child is *not* a ``PropertyEQ``
     (the ``AS name`` form). An empty struct (zero children) is treated
-    as named — there is nothing positional about it.
+    as named — there is nothing positional about it. A struct whose
+    unaliased children all have BigQuery-inferable names gets those
+    names made explicit instead (see the module docstring).
     """
     modified = False
     for node in list(tree.find_all(exp.Struct)):
         children = list(node.expressions)
         if not children:
+            continue
+        if _name_inferable_fields(node, children):
+            modified = True
             continue
         if any(isinstance(child, exp.PropertyEQ) for child in children):
             continue
@@ -84,6 +102,52 @@ def _rewrite_positional_structs(tree: exp.Expression) -> bool:
         node.replace(replacement)
         modified = True
     return modified
+
+
+def _name_inferable_fields(node: exp.Struct, children: list[exp.Expression]) -> bool:
+    """Alias every unaliased child of ``node`` with its BigQuery-inferred name.
+
+    Applies only when at least one child is unaliased, every unaliased
+    child is a column reference or field path, and ``node`` is outside
+    an ``INSERT`` / ``MERGE`` / set operation (which bind structs by
+    position). Returns ``True`` when ``node`` was rewritten.
+    """
+    if node.find_ancestor(exp.Insert, exp.Merge, exp.SetOperation) is not None:
+        return False
+    names: list[str | None] = []
+    for child in children:
+        if isinstance(child, exp.PropertyEQ):
+            names.append(None)
+            continue
+        name = _inferred_field_name(child)
+        if name is None:
+            return False
+        names.append(name)
+    if all(name is None for name in names):
+        return False
+    node.set(
+        "expressions",
+        [
+            child
+            if name is None
+            else exp.PropertyEQ(this=exp.to_identifier(name), expression=child.copy())
+            for child, name in zip(children, names, strict=True)
+        ],
+    )
+    return True
+
+
+def _inferred_field_name(child: exp.Expression) -> str | None:
+    """Return the field name BigQuery infers for an unaliased struct field.
+
+    ``col`` → ``col``; ``t.col`` / ``s.a.b`` → the last path component.
+    ``None`` for any other expression, which BigQuery leaves anonymous.
+    """
+    if isinstance(child, exp.Column) and not isinstance(child.this, exp.Star):
+        return child.name or None
+    if isinstance(child, exp.Dot) and isinstance(child.expression, exp.Identifier):
+        return child.expression.name or None
+    return None
 
 
 __all__ = ["rewrite_struct_helpers"]

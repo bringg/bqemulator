@@ -132,6 +132,79 @@ class TestShortCircuit:
         assert "ds.orders" in out
 
 
+def _add_view(catalog: MemoryCatalogRepository, table_id: str, view_query: str) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    catalog.create_table(
+        TableMeta(
+            project_id="p",
+            dataset_id="ds",
+            table_id=table_id,
+            table_type="VIEW",
+            view_query=view_query,
+            creation_time=now,
+            last_modified_time=now,
+            etag=f'"{table_id}"',
+        ),
+    )
+
+
+class TestEngineViewsNotExpanded:
+    """Views DuckDB holds natively stay unexpanded while no policy exists."""
+
+    def test_engine_view_left_as_reference(
+        self,
+        catalog: MemoryCatalogRepository,
+    ) -> None:
+        _add_view(catalog, "inner_v", "SELECT * FROM ds.orders")
+        _add_view(catalog, "outer_v", "SELECT * FROM ds.inner_v")
+        sql = "SELECT * FROM ds.outer_v"
+        out = rewrite_for_row_access(
+            sql,
+            project_id="p",
+            caller=CallerIdentity(principal="user:a@x", is_authenticated=True),
+            catalog=catalog,
+            is_engine_view=lambda _p, _d, _t: True,
+        )
+        assert out == sql
+
+    def test_catalog_only_view_still_expanded(
+        self,
+        catalog: MemoryCatalogRepository,
+    ) -> None:
+        # REST-created views have no DuckDB counterpart and must inline.
+        _add_view(catalog, "rest_v", "SELECT * FROM ds.orders")
+        out = rewrite_for_row_access(
+            "SELECT * FROM ds.rest_v",
+            project_id="p",
+            caller=CallerIdentity(principal="user:a@x", is_authenticated=True),
+            catalog=catalog,
+            is_engine_view=lambda _p, _d, t: t != "rest_v",
+        )
+        assert "ds.orders" in out
+
+    def test_engine_view_expanded_when_policies_exist(
+        self,
+        catalog: MemoryCatalogRepository,
+    ) -> None:
+        # Any policy in the catalog keeps full expansion so RAP is
+        # enforced on base tables reached through views.
+        _add_view(catalog, "v", "SELECT * FROM ds.orders")
+        _add_policy(
+            catalog,
+            policy_id="p1",
+            filter_predicate="region = 'US'",
+            grantees=("user:a@x",),
+        )
+        out = rewrite_for_row_access(
+            "SELECT * FROM ds.v",
+            project_id="p",
+            caller=CallerIdentity(principal="user:a@x", is_authenticated=True),
+            catalog=catalog,
+            is_engine_view=lambda _p, _d, _t: True,
+        )
+        assert "region = 'US'" in out
+
+
 class TestLeafTableEnforcement:
     def test_caller_with_grant_gets_filter(
         self,

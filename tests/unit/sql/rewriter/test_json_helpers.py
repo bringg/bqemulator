@@ -71,3 +71,40 @@ class TestToJsonStringUnchanged:
         out = rewrite_json_helpers(sql)
         # No CAST AS JSON wrap added.
         assert "AS JSON" not in out.upper()
+
+
+class TestJsonExtractString:
+    """``JSON_EXTRACT`` / ``JSON_QUERY`` are wrapped in ``CAST(... AS STRING)``."""
+
+    def test_json_extract_wraps_cast(self) -> None:
+        """JSON_EXTRACT inside a function argument gets the STRING cast."""
+        out = rewrite_json_helpers("SELECT NULLIF(JSON_EXTRACT(m, '$.a'), '') FROM t")
+        assert out.upper().count("CAST(") == 1
+        assert "AS STRING" in out.upper()
+
+    def test_hand_written_cast_not_double_wrapped(self) -> None:
+        """A hand-written CAST(JSON_QUERY(...) AS STRING) is left as-is."""
+        sql = "SELECT CAST(JSON_QUERY(m, '$.a') AS STRING) FROM t"
+        assert rewrite_json_helpers(sql).upper().count("CAST(") == 1
+
+    @pytest.mark.parametrize("fn", ["JSON_EXTRACT", "JSON_QUERY"])
+    def test_nullif_with_empty_string_executes(self, fn: str) -> None:
+        """``NULLIF(JSON_EXTRACT(...), '')`` compares STRINGs, as in BigQuery.
+
+        DuckDB's ``->`` returns JSON, and ``''`` is not valid JSON, so the
+        comparison raised "Malformed JSON" before the cast.
+        """
+        import duckdb
+
+        from bqemulator.domain.result import Ok
+        from bqemulator.sql.translator import SQLTranslator
+
+        result = SQLTranslator().translate(
+            f"""SELECT NULLIF({fn}('{{"a":{{"b":1}}}}', '$.a'), ''),"""
+            f""" NULLIF({fn}('{{"a":""}}', '$.a'), '""')"""
+        )
+        assert isinstance(result, Ok), result
+        assert result.value.upper().count("CAST(") == 2
+        con = duckdb.connect()
+        con.execute("INSTALL json; LOAD json;")
+        assert con.execute(result.value).fetchone() == ('{"b":1}', None)
