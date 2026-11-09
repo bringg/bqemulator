@@ -146,3 +146,59 @@ class TestPositionalStruct:
         assert con.sql("SELECT * FROM struct_t").fetchall() == [
             (1, {"name": "Alice", "age": 30}),
         ]
+
+
+class TestInferredStructFieldNames:
+    """Unaliased column fields keep their BigQuery-inferred names."""
+
+    def test_column_fields_named_after_columns(self) -> None:
+        out = rewrite_struct_helpers("SELECT STRUCT(rating_id, t.rating) AS s FROM t")
+        assert "rating_id AS rating_id" in out
+        assert "t.rating AS rating" in out
+        assert "ROW" not in out
+
+    def test_mixed_alias_and_column(self) -> None:
+        out = rewrite_struct_helpers("SELECT STRUCT(a, b + 1 AS c) AS s FROM t")
+        assert "a AS a" in out
+        assert "b + 1 AS c" in out
+
+    def test_expression_field_stays_positional(self) -> None:
+        # ``a + 1`` has no inferable name, so the struct keeps the ROW path.
+        out = rewrite_struct_helpers("SELECT STRUCT(a, a + 1) AS s FROM t")
+        assert "ROW(" in out
+
+    def test_insert_select_stays_positional(self) -> None:
+        out = rewrite_struct_helpers("INSERT INTO dst SELECT 1, STRUCT(name, age) FROM src")
+        assert "ROW(" in out
+
+    def test_set_operation_stays_positional(self) -> None:
+        out = rewrite_struct_helpers(
+            "SELECT STRUCT(1 AS id) AS s UNION ALL SELECT STRUCT(x) FROM t",
+        )
+        assert "ROW(" in out
+
+    def test_unnest_alias_field_access(
+        self,
+        t: SQLTranslator,
+        con: duckdb.DuckDBPyConnection,
+    ) -> None:
+        con.execute(
+            "CREATE TABLE ratings_base AS "
+            "SELECT 1 AS task_id, 5 AS rating, ['fast'] AS reasons "
+            "UNION ALL SELECT 1, 3, ['slow', 'fast']",
+        )
+        agg = t.translate(
+            "CREATE VIEW order_ratings AS SELECT task_id, "
+            "ARRAY_AGG(STRUCT(rating, reasons)) AS ratings "
+            "FROM ratings_base GROUP BY task_id",
+        )
+        assert isinstance(agg, Ok)
+        con.execute(agg.value)
+        row = _execute(
+            t,
+            con,
+            "SELECT (SELECT AVG(r.rating) FROM UNNEST(ratings) AS r), "
+            "ARRAY(SELECT DISTINCT reason FROM UNNEST(ratings) AS r, "
+            "UNNEST(r.reasons) AS reason ORDER BY reason) FROM order_ratings",
+        )
+        assert row == (4.0, ["fast", "slow"])
