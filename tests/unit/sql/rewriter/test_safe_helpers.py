@@ -109,8 +109,10 @@ class TestSafeCallsExecuteOnDuckDB:
             # SAFE.STRING of a JSON string yields the unwrapped text, which
             # is itself JSON — the double-encoded payload shape.
             (
-                "SELECT TO_JSON_STRING(SAFE.PARSE_JSON(SAFE.STRING("
-                'SAFE.PARSE_JSON(\'"{\\\\"k\\\\":1}"\'))))',
+                (
+                    "SELECT TO_JSON_STRING(SAFE.PARSE_JSON(SAFE.STRING("
+                    'SAFE.PARSE_JSON(\'"{\\\\"k\\\\":1}"\'))))'
+                ),
                 '{"k":1}',
             ),
             ("SELECT TO_JSON_STRING(SAFE.PARSE_JSON('{\"k\": 1}')['k'])", "1"),

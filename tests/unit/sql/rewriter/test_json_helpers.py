@@ -89,7 +89,7 @@ class TestJsonExtractString:
 
     @pytest.mark.parametrize("fn", ["JSON_EXTRACT", "JSON_QUERY"])
     def test_nullif_with_empty_string_executes(self, fn: str) -> None:
-        """``NULLIF(JSON_EXTRACT(...), '')`` compares STRINGs, as in BigQuery.
+        """``NULLIF(JSON_EXTRACT(...), '')`` compares STRING values, as in BigQuery.
 
         DuckDB's ``->`` returns JSON, and ``''`` is not valid JSON, so the
         comparison raised "Malformed JSON" before the cast.

@@ -25,8 +25,8 @@ Helpers are registered exactly once per :class:`DuckDBEngine`; concurrent
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
 import contextlib
+from dataclasses import dataclass
 import datetime as _datetime
 from decimal import Decimal, InvalidOperation
 import hashlib

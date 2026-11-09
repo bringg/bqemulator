@@ -277,7 +277,8 @@ class TestArrayAggIgnoreNullsRewriter:
         row = _execute(
             t,
             con,
-            "SELECT ARRAY_AGG(tag_id IGNORE NULLS ORDER BY ts DESC LIMIT 1)[SAFE_OFFSET(0)] AS v FROM t",
+            "SELECT ARRAY_AGG(tag_id IGNORE NULLS ORDER BY ts DESC LIMIT 1)[SAFE_OFFSET(0)]"
+            " AS v FROM t",
         )
         assert row == (3,)
 

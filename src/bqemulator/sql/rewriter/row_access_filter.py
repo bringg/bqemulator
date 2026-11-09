@@ -99,9 +99,7 @@ def rewrite_for_row_access(
         catalog=catalog,
         matcher=matcher,
         write_targets=write_targets,
-        is_engine_view=(
-            is_engine_view if not catalog.list_all_row_access_policies() else None
-        ),
+        is_engine_view=(is_engine_view if not catalog.list_all_row_access_policies() else None),
     )
 
     modified = rewriter.rewrite_tree(tree, depth=0)
