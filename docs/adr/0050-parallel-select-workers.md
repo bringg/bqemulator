@@ -15,11 +15,12 @@ statement itself does not cause.
 
 ## Decision
 
-A new setting, `query_workers` (`BQEMU_QUERY_WORKERS`, default `1`, range
+A new setting, `query_workers` (`BQEMU_QUERY_WORKERS`, default `4`, range
 1-64), adds a second lane for read-only statements.
 
-- **Opt-in, default unchanged.** With `query_workers=1` no read pool exists
-  and every statement runs on the single writer lane as before.
+- **On by default, one switch to turn it off.** The default is 4 read
+  threads. With `query_workers=1` no read pool exists and every statement
+  runs on the single writer lane as before.
 - **Read pool.** With `query_workers=N` above 1, `DuckDBEngine.start` creates
   `N` further cursors from the main connection and a second thread pool of
   `N` threads. Each read statement borrows a cursor from a queue and returns

@@ -120,7 +120,7 @@ class Settings(BaseSettings):
         description="Maximum concurrent query/load/extract/copy jobs",
     )
     query_workers: int = Field(
-        default=1,
+        default=4,
         ge=1,
         le=64,
         description="Worker threads for read-only SELECT statements; 1 keeps one query thread.",

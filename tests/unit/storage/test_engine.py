@@ -211,11 +211,13 @@ class TestReadOnlyParallelism:
         finally:
             await engine.stop()
 
-    async def test_default_settings_have_no_read_pool(self, ephemeral_settings: Settings) -> None:
-        engine = DuckDBEngine(ephemeral_settings)
+    async def test_default_is_four_workers(self) -> None:
+        assert Settings.model_fields["query_workers"].default == 4
+
+    async def test_one_worker_has_no_read_pool(self, ephemeral_settings: Settings) -> None:
+        engine = DuckDBEngine(ephemeral_settings.model_copy(update={"query_workers": 1}))
         await engine.start()
         try:
-            assert ephemeral_settings.query_workers == 1
             assert engine._read_executor is None
             assert engine._read_cursors is None
             probe = _install_probe(engine, hold_seconds=0.1)
