@@ -119,6 +119,12 @@ class Settings(BaseSettings):
         le=1024,
         description="Maximum concurrent query/load/extract/copy jobs",
     )
+    query_workers: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description="Worker threads for read-only SELECT statements; 1 keeps one query thread.",
+    )
     query_cache_ttl_seconds: int = Field(
         default=86400,
         ge=0,

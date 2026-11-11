@@ -7,7 +7,8 @@ read/write concurrency for the same connection object).
 
 Query statements are the exception: :meth:`DuckDBEngine.fetch_arrow_off_loop`
 runs them on a second cursor of the same database, owned by a single worker
-thread, so a long query does not block the event loop (ADR 0049).
+thread, so a long query does not block the event loop (ADR 0049). Read-only
+statements can run on ``Settings.query_workers`` cursors in parallel (ADR 0050).
 
 The engine also handles startup tasks:
 
@@ -25,6 +26,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+import queue
 from typing import TYPE_CHECKING, Any
 
 from bqemulator.config import PersistenceMode, Settings
@@ -72,6 +74,9 @@ class DuckDBEngine:
         self._connection: duckdb.DuckDBPyConnection | None = None
         self._query_cursor: duckdb.DuckDBPyConnection | None = None
         self._query_executor: ThreadPoolExecutor | None = None
+        self._read_executor: ThreadPoolExecutor | None = None
+        self._read_cursors: queue.SimpleQueue[duckdb.DuckDBPyConnection] | None = None
+        self._read_cursor_list: list[duckdb.DuckDBPyConnection] = []
         self._write_lock = asyncio.Lock()
         self._started = False
 
@@ -103,6 +108,16 @@ class DuckDBEngine:
             max_workers=1,
             thread_name_prefix="bqemu-query",
         )
+        workers = self._settings.query_workers
+        if workers > 1:
+            self._read_cursor_list = [self._connection.cursor() for _ in range(workers)]
+            self._read_cursors = queue.SimpleQueue()
+            for cursor in self._read_cursor_list:
+                self._read_cursors.put(cursor)
+            self._read_executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="bqemu-read",
+            )
         self._started = True
 
     async def stop(self) -> None:
@@ -110,6 +125,13 @@ class DuckDBEngine:
         if self._query_executor is not None:
             self._query_executor.shutdown(wait=True, cancel_futures=True)
             self._query_executor = None
+        if self._read_executor is not None:
+            self._read_executor.shutdown(wait=True, cancel_futures=True)
+            self._read_executor = None
+        for cursor in self._read_cursor_list:
+            cursor.close()
+        self._read_cursor_list = []
+        self._read_cursors = None
         if self._query_cursor is not None:
             self._query_cursor.close()
             self._query_cursor = None
@@ -168,19 +190,29 @@ class DuckDBEngine:
         self,
         sql: str,
         parameters: list[Any] | None = None,
+        *,
+        read_only: bool = False,
     ) -> pa.Table:
         """Like :meth:`fetch_arrow`, but without blocking the event loop.
 
         The statement runs on the query cursor in the engine's single
-        worker thread, so other requests (``/healthz`` included) are
-        served while it executes. Statements sent here still run one at
-        a time, in submission order. Connection-local objects (``TEMP``
-        tables and views, ``connection.register`` views) created on
-        :attr:`connection` are not visible to them.
+        worker thread, one at a time, in submission order. With
+        ``read_only=True`` and ``Settings.query_workers`` above 1 it runs
+        on a read cursor instead, in parallel with other read-only
+        statements. Connection-local objects (``TEMP`` tables and views,
+        ``connection.register`` views) are not visible to the read cursors.
         """
         if self._query_executor is None or self._query_cursor is None:
             raise InternalError("DuckDBEngine not started")
         loop = asyncio.get_running_loop()
+        if read_only and self._read_executor is not None and self._read_cursors is not None:
+            return await loop.run_in_executor(
+                self._read_executor,
+                _fetch_arrow_pooled,
+                self._read_cursors,
+                sql,
+                parameters,
+            )
         return await loop.run_in_executor(
             self._query_executor,
             _fetch_arrow,
@@ -302,6 +334,19 @@ def _fetch_arrow(
         result.to_arrow_table() if hasattr(result, "to_arrow_table") else result.fetch_arrow_table()
     )
     return _annotate_with_duckdb_types(arrow_table, description)
+
+
+def _fetch_arrow_pooled(
+    cursors: queue.SimpleQueue[duckdb.DuckDBPyConnection],
+    sql: str,
+    parameters: list[Any] | None,
+) -> pa.Table:
+    """Run :func:`_fetch_arrow` on a cursor borrowed from *cursors*."""
+    cursor = cursors.get()
+    try:
+        return _fetch_arrow(cursor, sql, parameters)
+    finally:
+        cursors.put(cursor)
 
 
 def _annotate_with_duckdb_types(
