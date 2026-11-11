@@ -439,6 +439,7 @@ async def execute_query_job(
         ctx=ctx,
         is_scripted=is_scripted,
         effective_caller=effective_caller,
+        read_only=not is_scripted and statement_type == "SELECT",
     )
 
     # Capture snapshots for tables modified by this statement, and
@@ -706,6 +707,7 @@ async def _run_query_body(
     ctx: AppContext,
     is_scripted: bool,
     effective_caller: CallerIdentity,
+    read_only: bool = False,
 ) -> pa.Table:
     """Execute ``bq_sql`` via the scripting interpreter or the legacy single-SQL path.
 
@@ -732,6 +734,7 @@ async def _run_query_body(
         query_params,
         ctx,
         caller=effective_caller,
+        read_only=read_only,
     )
     sync_created_schema(bq_sql, project_id, ctx)
     sync_created_table(bq_sql, project_id, ctx)
@@ -896,6 +899,7 @@ async def _run_single_sql(
     ctx: AppContext,
     *,
     caller: CallerIdentity,
+    read_only: bool = False,
 ) -> pa.Table:
     """Legacy fast path for a single SQL statement with BQ query params."""
     # Run the rewrite + translate chain BEFORE the try so a translation
@@ -916,7 +920,11 @@ async def _run_single_sql(
         # domain error that must be shaped by translate_runtime_error.
         duckdb_sql = rewrite_table_refs(translated_sql, project_id)
         duckdb_sql, param_values = bind_parameters(duckdb_sql, query_params)
-        return await ctx.engine.fetch_arrow_off_loop(duckdb_sql, param_values or None)
+        return await ctx.engine.fetch_arrow_off_loop(
+            duckdb_sql,
+            param_values or None,
+            read_only=read_only,
+        )
     except DomainError as exc:
         # ADR 0022 §3: pre-execution domain errors (RAP denials,
         # malformed-id ValidationErrors from the SQL pipeline) are
@@ -1688,7 +1696,7 @@ def _register_external_tables(
     Each view gets a per-job name so concurrent jobs reusing the same
     definition name don't collide, and bare references to the definition
     name in ``bq_sql`` are rewritten to it. The views are regular, not
-    ``TEMP``: the query runs on the engine's query cursor, which does not
+    ``TEMP``: the query runs on one of the engine's cursors, which do not
     see the main connection's temp objects. Only NEWLINE_DELIMITED_JSON
     with an explicit schema is supported.
     """
