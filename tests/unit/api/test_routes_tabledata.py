@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -128,6 +129,95 @@ class TestListTabledata:
     def test_list_missing_table_returns_404(self, app: FastAPI) -> None:
         c = TestClient(app, raise_server_exceptions=False)
         r = c.get("/bigquery/v2/projects/p/datasets/td/tables/ghost/data")
+        assert r.status_code == 404
+
+
+class TestListAnonymousQueryResult:
+    """``tabledata.list`` on a query job's anonymous ``destinationTable``.
+
+    The Ruby client reads query rows through ``tabledata.list`` on
+    ``configuration.query.destinationTable`` rather than through
+    ``jobs.getQueryResults``; both must return the same rows.
+    """
+
+    _SQL = (
+        "SELECT n, STRUCT(n AS a, [n, n + 1] AS ys) AS s,"
+        " TIMESTAMP_ADD(TIMESTAMP '2026-11-12 10:00:00.123456 UTC', INTERVAL n SECOND) AS ts,"
+        " IF(MOD(n, 2) = 0, NULL, CAST(n AS STRING)) AS maybe"
+        " FROM UNNEST(GENERATE_ARRAY(1, 5)) AS n ORDER BY n"
+    )
+
+    def _run(self, c: TestClient, job_id: str) -> tuple[str, list[Any]]:
+        """Insert the query job; return its destination ``data`` URL and getQueryResults rows."""
+        r = c.post(
+            "/bigquery/v2/projects/p/jobs",
+            json={
+                "jobReference": {"projectId": "p", "jobId": job_id},
+                "configuration": {"query": {"query": self._SQL, "destinationTable": None}},
+            },
+        )
+        assert r.status_code == 200
+        dest = r.json()["configuration"]["query"]["destinationTable"]
+        assert dest["datasetId"] == "_bqemu_anonymous"
+        url = (
+            f"/bigquery/v2/projects/{dest['projectId']}/datasets/{dest['datasetId']}"
+            f"/tables/{dest['tableId']}/data"
+        )
+        qr = c.get(f"/bigquery/v2/projects/p/queries/{job_id}")
+        assert qr.status_code == 200
+        return url, qr.json()["rows"]
+
+    @pytest.mark.parametrize(
+        "job_id",
+        [
+            "5f0c8a52-3d1e-4b7a-9c2d-0e1f2a3b4c5d",  # UUID (Python / Node / Go / Java)
+            "job_qw8pT-LJOk-hmKsSh7ULEGSKTw-e",  # Ruby, hyphens stripped from tableId
+            "job_C8Fyu7FynTc7UTrfCh1QkZFz32Pj",  # Ruby, 32 chars without hyphens
+        ],
+    )
+    def test_pages_agree_with_get_query_results(self, app: FastAPI, job_id: str) -> None:
+        c = TestClient(app)
+        url, expected = self._run(c, job_id)
+
+        first = c.get(url, params={"maxResults": 2, "formatOptions.useInt64Timestamp": "true"})
+        assert first.status_code == 200
+        body = first.json()
+        assert body["kind"] == "bigquery#tableDataList"
+        assert body["totalRows"] == "5"
+        assert body["pageToken"] == "2"
+        rows = list(body["rows"])
+        token: str | None = body["pageToken"]
+        while token is not None:
+            page = c.get(url, params={"maxResults": 2, "pageToken": token}).json()
+            assert page["totalRows"] == "5"
+            rows.extend(page["rows"])
+            token = page.get("pageToken")
+        assert rows == expected
+        # Nested STRUCT / ARRAY cells and int64-microsecond TIMESTAMPs.
+        assert rows[0]["f"][1] == {"v": {"f": [{"v": "1"}, {"v": [{"v": "1"}, {"v": "2"}]}]}}
+        assert rows[0]["f"][2] == {"v": "1794477601123456"}
+        assert rows[1]["f"][3] == {"v": None}
+
+    def test_start_index_and_selected_fields(self, app: FastAPI) -> None:
+        c = TestClient(app)
+        url, expected = self._run(c, "job_selectedFields")
+        r = c.get(url, params={"startIndex": 3, "selectedFields": "ts, n,"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["totalRows"] == "5"
+        assert "pageToken" not in body
+        assert body["rows"] == [{"f": [row["f"][2], row["f"][0]]} for row in expected[3:]]
+
+    def test_unknown_selected_field_returns_400(self, app: FastAPI) -> None:
+        c = TestClient(app, raise_server_exceptions=False)
+        url, _ = self._run(c, "job_badField")
+        r = c.get(url, params={"selectedFields": "n,nope"})
+        assert r.status_code == 400
+        assert r.json()["error"]["errors"][0]["reason"] == "invalid"
+
+    def test_unknown_job_returns_404(self, app: FastAPI) -> None:
+        c = TestClient(app, raise_server_exceptions=False)
+        r = c.get("/bigquery/v2/projects/p/datasets/_bqemu_anonymous/tables/anonnosuchjob/data")
         assert r.status_code == 404
 
 

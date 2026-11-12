@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from bqemulator.jobs.executor import (
-    _ANONYMOUS_RESULTS_DATASET,
+    ANONYMOUS_RESULTS_DATASET,
     _build_query_configuration,
 )
 
@@ -56,7 +56,7 @@ class TestBuildQueryConfiguration:
         # Anonymous dataset; hyphens stripped from the job-id.
         assert config["query"]["destinationTable"] == {
             "projectId": "proj",
-            "datasetId": _ANONYMOUS_RESULTS_DATASET,
+            "datasetId": ANONYMOUS_RESULTS_DATASET,
             "tableId": "anon11111111222233334444555555555555",
         }
 
@@ -66,7 +66,7 @@ class TestBuildQueryConfiguration:
             project_id="proj",
             job_id="job-1",
         )
-        assert config["query"]["destinationTable"]["datasetId"] == (_ANONYMOUS_RESULTS_DATASET)
+        assert config["query"]["destinationTable"]["datasetId"] == (ANONYMOUS_RESULTS_DATASET)
         assert config["query"]["destinationTable"]["tableId"] == "anonjob1"
 
     def test_query_text_is_preserved_verbatim(self) -> None:
@@ -82,4 +82,4 @@ class TestBuildQueryConfiguration:
             project_id="proj",
             job_id="abc",
         )
-        assert config["query"]["destinationTable"]["datasetId"] == (_ANONYMOUS_RESULTS_DATASET)
+        assert config["query"]["destinationTable"]["datasetId"] == (ANONYMOUS_RESULTS_DATASET)

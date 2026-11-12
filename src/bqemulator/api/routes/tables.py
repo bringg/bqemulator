@@ -28,6 +28,12 @@ from bqemulator.catalog.models import (
     TimePartitioning,
 )
 from bqemulator.domain.errors import ResourceRef, resource_not_found
+from bqemulator.jobs.executor import (
+    JOB_RESULTS,
+    JOB_SCHEMAS,
+    is_anonymous_result_table,
+    resolve_anonymous_result_job,
+)
 from bqemulator.storage.sql_identifiers import quoted_table_ref
 from bqemulator.storage.type_map import bq_schema_to_duckdb_columns
 
@@ -336,18 +342,12 @@ def get_table(
     ``client.get_table(query_job.destination)`` call has a real
     ``num_rows`` to read for ``SELECT``-style queries.
     """
-    if dataset_id == "_bqemu_anonymous" and table_id.startswith("anon"):
+    if is_anonymous_result_table(dataset_id, table_id):
         return _anonymous_result_table_to_rest(project_id, dataset_id, table_id)
     t = ctx.catalog.get_table(project_id, dataset_id, table_id)
     if t is None:
         raise resource_not_found(ResourceRef("table", project_id, dataset_id, table_id))
     return _table_to_rest(t)
-
-
-#: Length of a UUID-4 hex string with hyphens stripped (``32``). Used
-#: by :func:`_anonymous_result_table_to_rest` to decide whether to
-#: re-insert hyphens before looking the job up in ``JOB_RESULTS``.
-_UUID_HEX_LEN = 32
 
 
 def _anonymous_result_table_to_rest(
@@ -357,23 +357,14 @@ def _anonymous_result_table_to_rest(
 ) -> dict[str, Any]:
     """Synthesise a table-resource response for an anonymous query result.
 
-    The ``table_id`` carries the job-id with hyphens stripped (see
-    :func:`bqemulator.jobs.executor._build_query_configuration`); we
-    look the rows up directly in
-    :data:`bqemulator.jobs.executor.JOB_RESULTS` (a dict keyed by the
-    original job-id).
+    :func:`bqemulator.jobs.executor.resolve_anonymous_result_job` maps
+    ``table_id`` back to the job whose rows live in
+    :data:`bqemulator.jobs.executor.JOB_RESULTS`. An unknown job yields
+    a zero-row, schema-less table.
     """
-    from bqemulator.jobs.executor import JOB_RESULTS, JOB_SCHEMAS
-
-    # ``table_id`` is ``anon<job_id with hyphens removed>``; rebuild
-    # the canonical job-id form by inserting hyphens at UUID positions.
-    flat = table_id.removeprefix("anon")
-    job_id = flat
-    if len(flat) == _UUID_HEX_LEN:
-        job_id = f"{flat[0:8]}-{flat[8:12]}-{flat[12:16]}-{flat[16:20]}-{flat[20:32]}"
-
-    arrow_table = JOB_RESULTS.get(job_id)
-    schema_fields = JOB_SCHEMAS.get(job_id) or []
+    job_id = resolve_anonymous_result_job(table_id)
+    arrow_table = JOB_RESULTS.get(job_id) if job_id is not None else None
+    schema_fields = (JOB_SCHEMAS.get(job_id) if job_id is not None else None) or []
     num_rows = arrow_table.num_rows if arrow_table is not None else 0
     return {
         "kind": "bigquery#table",
