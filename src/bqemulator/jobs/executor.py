@@ -778,10 +778,53 @@ def _finalize_statement_result(
 
 #: Dataset id under which bqemulator advertises anonymous-result tables.
 #: Real BigQuery uses ``_script<hash>`` for scripts and an internal
-#: per-job anonymous table for interactive queries; the
-#: ``api/routes/tables.py:get_table`` handler intercepts this dataset
-#: and synthesises a response from ``JOB_RESULTS``.
-_ANONYMOUS_RESULTS_DATASET = "_bqemu_anonymous"
+#: per-job anonymous table for interactive queries. The
+#: ``tables.get`` and ``tabledata.list`` handlers intercept this dataset
+#: and serve the job's ``JOB_RESULTS`` / ``JOB_SCHEMAS`` entries.
+ANONYMOUS_RESULTS_DATASET = "_bqemu_anonymous"
+
+#: Prefix of every anonymous-result ``tableId``.
+_ANONYMOUS_TABLE_PREFIX = "anon"
+
+
+def anonymous_result_table_id(job_id: str) -> str:
+    """Return the anonymous-result ``tableId`` advertised for *job_id*.
+
+    Hyphens are stripped so the id stays a plain identifier; the
+    mapping is therefore not reversible on its own, and
+    :func:`resolve_anonymous_result_job` resolves it against the live
+    ``JOB_RESULTS`` keys instead.
+    """
+    return f"{_ANONYMOUS_TABLE_PREFIX}{job_id.replace('-', '')}"
+
+
+def is_anonymous_result_table(dataset_id: str, table_id: str) -> bool:
+    """Return whether ``dataset_id.table_id`` names an anonymous query-result table."""
+    return dataset_id == ANONYMOUS_RESULTS_DATASET and table_id.startswith(
+        _ANONYMOUS_TABLE_PREFIX,
+    )
+
+
+def resolve_anonymous_result_job(table_id: str) -> str | None:
+    """Return the id of the job whose results back anonymous table *table_id*.
+
+    Job ids are client-chosen: UUIDs from the Python / Node / Go / Java
+    clients, ``job_<urlsafe-base64>`` from the Ruby client, arbitrary
+    strings from the ``bq`` CLI. Any of them may carry hyphens, which
+    :func:`anonymous_result_table_id` strips, so the lookup tries the
+    hyphen-free suffix directly and then matches *table_id* against the
+    table id each stored job advertises. Returns ``None`` when no job
+    with stored results matches.
+    """
+    flat = table_id.removeprefix(_ANONYMOUS_TABLE_PREFIX)
+    if flat in JOB_RESULTS:
+        return flat
+    # Snapshot the keys: sync routes run on worker threads while the
+    # event loop inserts new results.
+    for job_id in tuple(JOB_RESULTS):
+        if anonymous_result_table_id(job_id) == table_id:
+            return job_id
+    return None
 
 
 def _build_query_configuration(
@@ -803,9 +846,9 @@ def _build_query_configuration(
     other query (``SELECT``, ``INSERT``, ``UPDATE``, ``DELETE``,
     ``MERGE``, etc.) the destination is a synthetic anonymous-result
     ref under the reserved
-    :data:`_ANONYMOUS_RESULTS_DATASET`; ``api/routes/tables.get_table``
-    fans that out by reading the job's row count + schema from
-    ``JOB_RESULTS``.
+    :data:`ANONYMOUS_RESULTS_DATASET`; ``tables.get`` serves the job's
+    row count + schema and ``tabledata.list`` serves its rows, both
+    from ``JOB_RESULTS``.
     """
     config: dict[str, Any] = {"query": {"query": bq_sql}}
     from bqemulator.catalog.ddl_sync import (
@@ -828,8 +871,8 @@ def _build_query_configuration(
     # shape always carries a non-``None`` ``destinationTable``.
     config["query"]["destinationTable"] = {
         "projectId": project_id,
-        "datasetId": _ANONYMOUS_RESULTS_DATASET,
-        "tableId": f"anon{job_id.replace('-', '')}",
+        "datasetId": ANONYMOUS_RESULTS_DATASET,
+        "tableId": anonymous_result_table_id(job_id),
     }
     return config
 
@@ -3356,17 +3399,21 @@ def _parse_fallback_tables(body: str) -> list[Any]:
 
 
 __all__ = [
+    "ANONYMOUS_RESULTS_DATASET",
     "JOB_RESULTS",
     "JOB_SCHEMAS",
+    "anonymous_result_table_id",
     "build_response_schema",
     "execute_copy_job",
     "execute_extract_job",
     "execute_load_job",
     "execute_query_job",
+    "is_anonymous_result_table",
     "parse_create_model",
     "parse_export_data",
     "preflight_create_model",
     "register_model",
+    "resolve_anonymous_result_job",
     "training_schema_sql",
     "write_export",
 ]

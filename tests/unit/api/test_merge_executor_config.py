@@ -65,6 +65,13 @@ class TestMergeExecutorConfig:
         # Caller's value wins.
         assert request["query"]["destinationTable"] == existing
 
+    def test_explicit_null_caller_destination_is_replaced(self) -> None:
+        # The Ruby client sends every unset field as ``null``.
+        request = {"query": {"query": "SELECT 1", "destinationTable": None}}
+        anon = {"projectId": "p", "datasetId": "_bqemu_anonymous", "tableId": "anon123"}
+        _merge_executor_config(request, {"query": {"destinationTable": anon}})
+        assert request["query"]["destinationTable"] == anon
+
     def test_no_op_when_executor_config_missing(self) -> None:
         request = {"query": {"query": "SELECT 1"}}
         _merge_executor_config(request, None)

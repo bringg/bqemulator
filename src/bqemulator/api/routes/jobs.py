@@ -1467,13 +1467,16 @@ async def insert_job(
             "Job configuration must contain one of: query, load, extract, copy",
         )
 
-    ctx.catalog.upsert_job(job_meta)
     # Merge any executor-enriched configuration (e.g. the
     # ``destinationTable`` populated by ``_build_query_configuration``
     # in ``jobs.executor``) over the request's original config so
-    # client-side fields (``useLegacySql``, ``defaultDataset``, etc.)
-    # survive while the executor's additions still reach the wire.
+    # client-side fields (``useLegacySql``, ``labels``, etc.) survive
+    # while the executor's additions still reach the wire. The merged
+    # config is what the job stores, so ``jobs.get`` / ``jobs.list`` /
+    # ``jobs.cancel`` render the same ``configuration`` as this response.
     _merge_executor_config(config, job_meta.configuration)
+    job_meta = job_meta.model_copy(update={"configuration": config})
+    ctx.catalog.upsert_job(job_meta)
     return _build_job_response(project_id, job_id, job_meta, config)
 
 
@@ -1483,11 +1486,15 @@ def _merge_executor_config(
 ) -> None:
     """Overlay executor-set ``configuration`` keys onto the request's config.
 
-    Currently only the ``query.destinationTable`` slot is propagated —
-    the executor sets this for every successful QUERY job so REST
-    clients that fetch the destination metadata post-execution (e.g.
-    dbt-bigquery's ``client.get_table(query_job.destination)``) see a
-    real ref instead of ``None``. Mutates ``request_config`` in place.
+    Only the ``query.destinationTable`` slot is propagated — the
+    executor sets this for every successful QUERY job so REST clients
+    that fetch the destination metadata post-execution (e.g.
+    dbt-bigquery's ``client.get_table(query_job.destination)``) or read
+    the result rows through it (the Ruby client's ``QueryJob#data`` via
+    ``tabledata.list``) see a real ref instead of ``None``. A
+    caller-supplied destination wins; an explicit ``null`` (the Ruby
+    client serialises every unset field that way) counts as absent.
+    Mutates ``request_config`` in place.
     """
     if not executor_config:
         return
@@ -1496,7 +1503,8 @@ def _merge_executor_config(
     if not dest:
         return
     request_query = request_config.setdefault("query", {})
-    request_query.setdefault("destinationTable", dest)
+    if request_query.get("destinationTable") is None:
+        request_query["destinationTable"] = dest
 
 
 # ---------------------------------------------------------------------------

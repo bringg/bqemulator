@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any, ClassVar
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -173,6 +174,77 @@ class TestJobsInsertEndpoint:
             },
         )
         assert r.status_code == 501
+
+
+class TestQueryJobDestinationTable:
+    """``configuration.query.destinationTable`` on the insert response and on ``jobs.get``.
+
+    The Ruby client (google-cloud-bigquery) serialises every unset
+    field as an explicit ``null`` and never re-fetches a job whose
+    insert response is already ``DONE``, so the insert response itself
+    must carry the anonymous destination it reads rows through.
+    """
+
+    _ANON: ClassVar[dict[str, str]] = {
+        "projectId": "p",
+        "datasetId": "_bqemu_anonymous",
+        "tableId": "anonjob_rubyStyle0123456789abcdefgh",
+    }
+
+    def _insert(self, c: TestClient, query: dict[str, Any]) -> dict[str, Any]:
+        r = c.post(
+            "/bigquery/v2/projects/p/jobs",
+            json={
+                "jobReference": {"projectId": "p", "jobId": "job_rubyStyle-0123456789abcdefgh"},
+                "configuration": {
+                    "dryRun": None,
+                    "labels": {"app": "hagmonia"},
+                    "query": query,
+                },
+            },
+        )
+        assert r.status_code == 200
+        body: dict[str, Any] = r.json()
+        return body
+
+    def test_explicit_null_destination_is_replaced_on_insert_response(
+        self,
+        app: FastAPI,
+    ) -> None:
+        c = TestClient(app)
+        body = self._insert(c, {"query": "SELECT 1 AS x", "destinationTable": None})
+        assert body["status"] == {"state": "DONE"}
+        assert body["configuration"]["query"]["destinationTable"] == self._ANON
+
+    def test_get_job_returns_insert_configuration_including_labels(self, app: FastAPI) -> None:
+        c = TestClient(app)
+        inserted = self._insert(
+            c,
+            {"query": "SELECT 1 AS x", "useLegacySql": False, "destinationTable": None},
+        )
+        r = c.get("/bigquery/v2/projects/p/jobs/job_rubyStyle-0123456789abcdefgh")
+        assert r.status_code == 200
+        fetched = r.json()["configuration"]
+        assert fetched == inserted["configuration"]
+        assert fetched["labels"] == {"app": "hagmonia"}
+        assert fetched["query"]["useLegacySql"] is False
+        assert fetched["query"]["destinationTable"] == self._ANON
+
+    def test_caller_destination_is_kept(self, app: FastAPI) -> None:
+        c = TestClient(app)
+        c.post("/bigquery/v2/projects/p/datasets", json={"datasetReference": {"datasetId": "d"}})
+        mine = {"projectId": "p", "datasetId": "d", "tableId": "out"}
+        body = self._insert(
+            c,
+            {
+                "query": "SELECT 1 AS x",
+                "destinationTable": mine,
+                "writeDisposition": "WRITE_TRUNCATE",
+            },
+        )
+        assert body["configuration"]["query"]["destinationTable"] == mine
+        r = c.get("/bigquery/v2/projects/p/jobs/job_rubyStyle-0123456789abcdefgh")
+        assert r.json()["configuration"]["query"]["destinationTable"] == mine
 
 
 class TestCreateSessionRoundTrip:

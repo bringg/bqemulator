@@ -17,7 +17,12 @@ from fastapi import APIRouter, Depends, Query, Request
 import pyarrow as pa
 
 from bqemulator.api.dependencies import AppContext, get_context
-from bqemulator.domain.errors import ResourceRef, resource_not_found
+from bqemulator.domain.errors import ResourceRef, ValidationError, resource_not_found
+from bqemulator.jobs.executor import (
+    JOB_RESULTS,
+    is_anonymous_result_table,
+    resolve_anonymous_result_job,
+)
 from bqemulator.storage.arrow_bridge import arrow_table_to_bq_rows, bq_rows_to_arrow
 from bqemulator.storage.sql_identifiers import quoted_table_ref, register_name
 
@@ -380,11 +385,15 @@ def list_tabledata(
     ``pageToken`` (opaque continuation token). The emulator's
     ``pageToken`` is a literal stringified offset — opaque to clients,
     cheap to compute, and consistent across re-reads.
-    """
-    table_meta = ctx.catalog.get_table(project_id, dataset_id, table_id)
-    if table_meta is None:
-        raise resource_not_found(ResourceRef("table", project_id, dataset_id, table_id))
 
+    Anonymous query-result tables (a query job's
+    ``configuration.query.destinationTable`` under the reserved
+    ``_bqemu_anonymous`` dataset) are served from the job's stored
+    result, so the rows match ``jobs.getQueryResults`` for the same job.
+
+    TIMESTAMP cells are always int64 microseconds since the epoch, the
+    encoding ``formatOptions.useInt64Timestamp=true`` selects.
+    """
     # Clamp the pagination integers so they can never smuggle SQL even
     # though FastAPI already enforces int types.
     max_results_safe = max(0, min(int(maxResults), 1_000_000))
@@ -397,6 +406,21 @@ def list_tabledata(
             start_index_safe = max(0, int(pageToken))
         except ValueError:
             start_index_safe = 0
+
+    if is_anonymous_result_table(dataset_id, table_id):
+        return _list_anonymous_result_rows(
+            project_id,
+            dataset_id,
+            table_id,
+            max_results=max_results_safe,
+            start_index=start_index_safe,
+            selected_fields=selectedFields,
+        )
+
+    table_meta = ctx.catalog.get_table(project_id, dataset_id, table_id)
+    if table_meta is None:
+        raise resource_not_found(ResourceRef("table", project_id, dataset_id, table_id))
+
     projection = _parse_selected_fields(selectedFields, table_meta)
     target_ref = quoted_table_ref(project_id, dataset_id, table_id)
     arrow_table = ctx.engine.fetch_arrow(
@@ -421,6 +445,62 @@ def list_tabledata(
     return response
 
 
+def _list_anonymous_result_rows(
+    project_id: str,
+    dataset_id: str,
+    table_id: str,
+    *,
+    max_results: int,
+    start_index: int,
+    selected_fields: str | None,
+) -> dict[str, Any]:
+    """Serve ``tabledata.list`` for an anonymous query-result table.
+
+    Rows come from the job's ``JOB_RESULTS`` entry and are encoded by
+    :func:`arrow_table_to_bq_rows`, the encoder ``jobs.getQueryResults``
+    uses. A table id that matches no stored job result is a 404, as
+    for any missing table.
+    """
+    job_id = resolve_anonymous_result_job(table_id)
+    arrow_table = JOB_RESULTS.get(job_id) if job_id is not None else None
+    if arrow_table is None:
+        raise resource_not_found(ResourceRef("table", project_id, dataset_id, table_id))
+
+    columns = _selected_column_names(selected_fields)
+    if columns is not None:
+        missing = [c for c in columns if c not in arrow_table.column_names]
+        if missing:
+            raise ValidationError(
+                f"selectedFields: field {missing[0]} not found in table "
+                f"{project_id}:{dataset_id}.{table_id}",
+            )
+        arrow_table = arrow_table.select(columns)
+
+    total = arrow_table.num_rows
+    rows = arrow_table_to_bq_rows(arrow_table, offset=start_index, limit=max_results)
+    response: dict[str, Any] = {
+        "kind": "bigquery#tableDataList",
+        "totalRows": str(total),
+        "rows": rows,
+    }
+    next_index = start_index + len(rows)
+    if next_index < total:
+        response["pageToken"] = str(next_index)
+    return response
+
+
+def _selected_column_names(selected_fields: str | None) -> list[str] | None:
+    """Split ``selectedFields=a,b,c`` into column names; ``None`` when no projection is requested.
+
+    Whitespace around names and empty entries (trailing commas) are
+    dropped.
+    """
+    if not selected_fields:
+        return None
+    columns = [c.strip() for c in selected_fields.split(",") if c.strip()]
+    return columns or None
+
+
 def _parse_selected_fields(selected_fields: str | None, table_meta: Any) -> str:  # noqa: ARG001
     """Translate ``selectedFields=a,b,c`` into a quoted SELECT projection.
 
@@ -431,11 +511,8 @@ def _parse_selected_fields(selected_fields: str | None, table_meta: Any) -> str:
     ``Catalog Error`` — the existing error mapper translates that to
     the BQ wire shape. Returns ``"*"`` when no projection is requested.
     """
-    if not selected_fields:
-        return "*"
-    # Split + strip, drop empty entries from trailing commas.
-    columns = [c.strip() for c in selected_fields.split(",") if c.strip()]
-    if not columns:
+    columns = _selected_column_names(selected_fields)
+    if columns is None:
         return "*"
     # Quote each column with double-quotes (DuckDB identifier
     # quoting) so reserved-word column names survive the round-trip.
