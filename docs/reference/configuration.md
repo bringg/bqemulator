@@ -30,6 +30,7 @@ Every setting can be provided three ways (priority high → low):
 | `BQEMU_GCS_LOCAL_ROOT` | — | unset | Local directory that `gs://` URIs resolve under |
 | `BQEMU_MAX_CONCURRENT_JOBS` | — | `8` | Concurrency cap on query/load/extract/copy jobs |
 | `BQEMU_QUERY_CACHE_TTL_SECONDS` | — | `86400` | Query result cache TTL (0 disables) |
+| `BQEMU_QUERY_WORKERS` | — | `4` | Threads (1-64) that run plain `SELECT` jobs in parallel, one DuckDB cursor each. `1` runs every query on one thread in submission order. With more than `1`, a `SELECT` can finish before an earlier-submitted DML job that is still queued, and it does not see `TEMP` tables created by single-statement jobs. DML, DDL, scripts and loads never use the parallel threads |
 | `BQEMU_TIME_TRAVEL_RETENTION_DAYS` | — | `7` | Snapshot retention for time travel (0–90) |
 
 ## Observability

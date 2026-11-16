@@ -92,7 +92,10 @@ Imports flow **downward only**. Domain modules never import from adapters.
   `DuckDBEngine`. Writes serialize on `asyncio.Lock`. The main connection
   is used only from the event loop; single-statement query jobs run on a
   second cursor owned by one worker thread
-  ([ADR 0049](../adr/0049-query-statements-off-event-loop.md)).
+  ([ADR 0049](../adr/0049-query-statements-off-event-loop.md)). Plain
+  `SELECT` jobs run on a pool of further cursors, one per read thread
+  (`BQEMU_QUERY_WORKERS`, default 4; `1` turns the pool off)
+  ([ADR 0050](../adr/0050-parallel-select-workers.md)).
 - **Immutable domain models.** Every catalog entity is a frozen Pydantic
   model; mutation goes through `.model_copy(update=...)`.
 - **UTC-only timestamps.** DuckDB is opened with

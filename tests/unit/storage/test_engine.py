@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -142,6 +144,144 @@ class TestFetchArrowOffLoop:
         engine = DuckDBEngine(ephemeral_settings)
         with pytest.raises(InternalError):
             await engine.fetch_arrow_off_loop("SELECT 1")
+
+
+class _Probe:
+    """Python UDF body that records how many calls overlap in time."""
+
+    def __init__(self, hold_seconds: float) -> None:
+        self.hold_seconds = hold_seconds
+        self.running = 0
+        self.max_running = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, value: int) -> int:
+        with self._lock:
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+        time.sleep(self.hold_seconds)
+        with self._lock:
+            self.running -= 1
+        return value
+
+
+def _install_probe(engine: DuckDBEngine, hold_seconds: float) -> _Probe:
+    probe = _Probe(hold_seconds)
+    engine.connection.create_function(
+        "bqemu_probe",
+        probe,
+        [engine.connection.type("BIGINT")],
+        engine.connection.type("BIGINT"),
+    )
+    return probe
+
+
+# DuckDB 2.x warns on the Arrow conversion, and the repo filter makes warnings errors.
+@pytest.mark.filterwarnings("ignore:Arrow output on a DB-API result")
+@pytest.mark.asyncio
+class TestReadOnlyParallelism:
+    async def test_read_only_selects_overlap(self, ephemeral_settings: Settings) -> None:
+        engine = DuckDBEngine(ephemeral_settings.model_copy(update={"query_workers": 4}))
+        await engine.start()
+        try:
+            probe = _install_probe(engine, hold_seconds=0.4)
+            started = time.perf_counter()
+            tables = await asyncio.gather(
+                *(
+                    engine.fetch_arrow_off_loop(f"SELECT bqemu_probe({i}) AS v", read_only=True)
+                    for i in range(4)
+                ),
+            )
+            elapsed = time.perf_counter() - started
+            assert sorted(t.column("v")[0].as_py() for t in tables) == [0, 1, 2, 3]
+            assert probe.max_running == 4
+            assert elapsed < 4 * 0.4 * 0.75
+        finally:
+            await engine.stop()
+
+    async def test_read_only_false_stays_serial(self, ephemeral_settings: Settings) -> None:
+        engine = DuckDBEngine(ephemeral_settings.model_copy(update={"query_workers": 4}))
+        await engine.start()
+        try:
+            probe = _install_probe(engine, hold_seconds=0.1)
+            await asyncio.gather(
+                *(engine.fetch_arrow_off_loop(f"SELECT bqemu_probe({i}) AS v") for i in range(4)),
+            )
+            assert probe.max_running == 1
+        finally:
+            await engine.stop()
+
+    async def test_default_is_four_workers(self) -> None:
+        assert Settings.model_fields["query_workers"].default == 4
+
+    async def test_one_worker_has_no_read_pool(self, ephemeral_settings: Settings) -> None:
+        engine = DuckDBEngine(ephemeral_settings.model_copy(update={"query_workers": 1}))
+        await engine.start()
+        try:
+            assert engine._read_executor is None
+            assert engine._read_cursors is None
+            probe = _install_probe(engine, hold_seconds=0.1)
+            await asyncio.gather(
+                *(
+                    engine.fetch_arrow_off_loop(f"SELECT bqemu_probe({i}) AS v", read_only=True)
+                    for i in range(4)
+                ),
+            )
+            assert probe.max_running == 1
+        finally:
+            await engine.stop()
+
+    async def test_read_cursors_see_main_connection_state(
+        self,
+        ephemeral_settings: Settings,
+    ) -> None:
+        engine = DuckDBEngine(ephemeral_settings.model_copy(update={"query_workers": 2}))
+        await engine.start()
+        try:
+            engine.execute('CREATE TABLE "_bqemulator_catalog"."ro" AS SELECT 1 AS x')
+            table = await engine.fetch_arrow_off_loop(
+                "SELECT current_setting('TimeZone') AS tz, bqemu_normalize('a', 'NFC') AS n,"
+                ' x FROM "_bqemulator_catalog"."ro"',
+                read_only=True,
+            )
+            assert table.to_pylist() == [{"tz": "UTC", "n": "a", "x": 1}]
+            engine.execute('INSERT INTO "_bqemulator_catalog"."ro" VALUES (2)')
+            count = await engine.fetch_arrow_off_loop(
+                'SELECT count(*) AS c FROM "_bqemulator_catalog"."ro"',
+                read_only=True,
+            )
+            assert count.to_pylist() == [{"c": 2}]
+        finally:
+            await engine.stop()
+
+    async def test_cursor_returned_to_pool_after_error(
+        self,
+        ephemeral_settings: Settings,
+    ) -> None:
+        engine = DuckDBEngine(ephemeral_settings.model_copy(update={"query_workers": 2}))
+        await engine.start()
+        try:
+            for _ in range(5):
+                with pytest.raises(Exception, match="Catalog Error"):
+                    await engine.fetch_arrow_off_loop("SELECT * FROM nope", read_only=True)
+            table = await engine.fetch_arrow_off_loop("SELECT 1 AS a", read_only=True)
+            assert table.to_pylist() == [{"a": 1}]
+        finally:
+            await engine.stop()
+
+    async def test_stop_closes_the_read_pool(self, ephemeral_settings: Settings) -> None:
+        engine = DuckDBEngine(ephemeral_settings.model_copy(update={"query_workers": 3}))
+        await engine.start()
+        cursors = list(engine._read_cursor_list)
+        assert len(cursors) == 3
+        await engine.stop()
+        assert engine._read_executor is None
+        assert engine._read_cursors is None
+        assert engine._read_cursor_list == []
+        for cursor in cursors:
+            with pytest.raises(Exception, match="closed"):
+                cursor.execute("SELECT 1")
+        await engine.stop()
 
 
 @pytest.mark.asyncio
