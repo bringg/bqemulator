@@ -16,6 +16,7 @@ from bqemulator.catalog.memory_repository import MemoryCatalogRepository
 from bqemulator.config import Settings
 from bqemulator.domain.clock import FrozenClock
 from bqemulator.domain.events import EventBus
+from bqemulator.jobs.executor import anonymous_result_table_id
 from bqemulator.observability.metrics import MetricsRegistry
 from bqemulator.row_access.policy import RowAccessPolicyManager
 from bqemulator.storage.engine import DuckDBEngine
@@ -188,7 +189,7 @@ class TestQueryJobDestinationTable:
     _ANON: ClassVar[dict[str, str]] = {
         "projectId": "p",
         "datasetId": "_bqemu_anonymous",
-        "tableId": "anonjob_rubyStyle0123456789abcdefgh",
+        "tableId": anonymous_result_table_id("p", "job_rubyStyle-0123456789abcdefgh"),
     }
 
     def _insert(self, c: TestClient, query: dict[str, Any]) -> dict[str, Any]:
@@ -245,6 +246,55 @@ class TestQueryJobDestinationTable:
         assert body["configuration"]["query"]["destinationTable"] == mine
         r = c.get("/bigquery/v2/projects/p/jobs/job_rubyStyle-0123456789abcdefgh")
         assert r.json()["configuration"]["query"]["destinationTable"] == mine
+
+
+class TestQueryRouteStoredConfiguration:
+    """``jobs.get`` on a ``jobs.query`` job returns the request's configuration.
+
+    ``jobs.query`` takes a ``QueryRequest``, not a job resource; the
+    fields that ``JobConfiguration`` also carries are stored on the job,
+    with the executor's ``destinationTable`` merged in, the way
+    ``jobs.insert`` stores its request configuration.
+    """
+
+    _REQUEST: ClassVar[dict[str, Any]] = {
+        "query": "SELECT 1 AS x",
+        "useLegacySql": False,
+        "labels": {"app": "hagmonia"},
+        "maxResults": 5,
+        "timeoutMs": 1000,
+    }
+
+    def test_get_job_returns_request_configuration(self, app: FastAPI) -> None:
+        c = TestClient(app)
+        r = c.post("/bigquery/v2/projects/p/queries", json=self._REQUEST)
+        assert r.status_code == 200
+        job_id = r.json()["jobReference"]["jobId"]
+        config = c.get(f"/bigquery/v2/projects/p/jobs/{job_id}").json()["configuration"]
+        assert config["labels"] == {"app": "hagmonia"}
+        assert config["query"]["query"] == "SELECT 1 AS x"
+        assert config["query"]["useLegacySql"] is False
+        assert config["query"]["destinationTable"] == {
+            "projectId": "p",
+            "datasetId": "_bqemu_anonymous",
+            "tableId": anonymous_result_table_id("p", job_id),
+        }
+        # Response-shaping fields are not job configuration.
+        assert "maxResults" not in config["query"]
+        assert "timeoutMs" not in config["query"]
+
+    def test_failed_query_stores_request_configuration(self, app: FastAPI) -> None:
+        c = TestClient(app)
+        r = c.post(
+            "/bigquery/v2/projects/p/queries",
+            json={**self._REQUEST, "query": "SELECT * FROM `p.nope.missing`"},
+        )
+        assert r.status_code == 200
+        assert r.json()["errors"]
+        job_id = r.json()["jobReference"]["jobId"]
+        config = c.get(f"/bigquery/v2/projects/p/jobs/{job_id}").json()["configuration"]
+        assert config["labels"] == {"app": "hagmonia"}
+        assert config["query"] == {"query": "SELECT * FROM `p.nope.missing`", "useLegacySql": False}
 
 
 class TestCreateSessionRoundTrip:

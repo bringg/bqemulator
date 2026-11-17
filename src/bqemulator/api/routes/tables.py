@@ -362,7 +362,7 @@ def _anonymous_result_table_to_rest(
     :data:`bqemulator.jobs.executor.JOB_RESULTS`. An unknown job yields
     a zero-row, schema-less table.
     """
-    job_id = resolve_anonymous_result_job(table_id)
+    job_id = resolve_anonymous_result_job(project_id, table_id)
     arrow_table = JOB_RESULTS.get(job_id) if job_id is not None else None
     schema_fields = (JOB_SCHEMAS.get(job_id) if job_id is not None else None) or []
     num_rows = arrow_table.num_rows if arrow_table is not None else 0

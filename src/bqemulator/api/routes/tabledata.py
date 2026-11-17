@@ -461,7 +461,7 @@ def _list_anonymous_result_rows(
     uses. A table id that matches no stored job result is a 404, as
     for any missing table.
     """
-    job_id = resolve_anonymous_result_job(table_id)
+    job_id = resolve_anonymous_result_job(project_id, table_id)
     arrow_table = JOB_RESULTS.get(job_id) if job_id is not None else None
     if arrow_table is None:
         raise resource_not_found(ResourceRef("table", project_id, dataset_id, table_id))

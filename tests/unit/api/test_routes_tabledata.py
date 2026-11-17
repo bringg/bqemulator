@@ -171,8 +171,8 @@ class TestListAnonymousQueryResult:
         "job_id",
         [
             "5f0c8a52-3d1e-4b7a-9c2d-0e1f2a3b4c5d",  # UUID (Python / Node / Go / Java)
-            "job_qw8pT-LJOk-hmKsSh7ULEGSKTw-e",  # Ruby, hyphens stripped from tableId
-            "job_C8Fyu7FynTc7UTrfCh1QkZFz32Pj",  # Ruby, 32 chars without hyphens
+            "job_qw8pT-LJOk-hmKsSh7ULEGSKTw-e",  # Ruby client, with hyphens
+            "job_C8Fyu7FynTc7UTrfCh1QkZFz32Pj",  # Ruby client, without hyphens
         ],
     )
     def test_pages_agree_with_get_query_results(self, app: FastAPI, job_id: str) -> None:
@@ -219,6 +219,37 @@ class TestListAnonymousQueryResult:
         c = TestClient(app, raise_server_exceptions=False)
         r = c.get("/bigquery/v2/projects/p/datasets/_bqemu_anonymous/tables/anonnosuchjob/data")
         assert r.status_code == 404
+
+    def test_job_ids_differing_only_by_hyphens_get_their_own_rows(self, app: FastAPI) -> None:
+        c = TestClient(app)
+        urls = {}
+        for job_id, sql in (("ab", "SELECT 1 AS n"), ("a-b", "SELECT 2 AS n")):
+            r = c.post(
+                "/bigquery/v2/projects/p/jobs",
+                json={
+                    "jobReference": {"projectId": "p", "jobId": job_id},
+                    "configuration": {"query": {"query": sql}},
+                },
+            )
+            dest = r.json()["configuration"]["query"]["destinationTable"]
+            urls[job_id] = (
+                f"/bigquery/v2/projects/p/datasets/_bqemu_anonymous/tables/{dest['tableId']}/data"
+            )
+        assert urls["ab"] != urls["a-b"]
+        assert c.get(urls["ab"]).json()["rows"] == [{"f": [{"v": "1"}]}]
+        assert c.get(urls["a-b"]).json()["rows"] == [{"f": [{"v": "2"}]}]
+
+    def test_other_project_cannot_read_the_table(self, app: FastAPI) -> None:
+        c = TestClient(app, raise_server_exceptions=False)
+        url, _ = self._run(c, "job_projectScoped")
+        r = c.get(url.replace("/projects/p/", "/projects/other/"))
+        assert r.status_code == 404
+
+    def test_deleted_job_returns_404(self, app: FastAPI) -> None:
+        c = TestClient(app, raise_server_exceptions=False)
+        url, _ = self._run(c, "job_deleted")
+        assert c.delete("/bigquery/v2/projects/p/jobs/job_deleted/delete").status_code == 200
+        assert c.get(url).status_code == 404
 
 
 class TestListPagination:
