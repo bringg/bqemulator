@@ -93,3 +93,13 @@ class TestBuildQueryConfiguration:
             job_id="abc",
         )
         assert config["query"]["destinationTable"]["datasetId"] == (ANONYMOUS_RESULTS_DATASET)
+
+    def test_detect_create_table_off_gives_anonymous_destination(self) -> None:
+        config = _build_query_configuration(
+            "CREATE TABLE `proj`.`ds`.`t2` (id INT64)",
+            project_id="proj",
+            job_id="job-2",
+            detect_create_table=False,
+        )
+        assert config["query"]["destinationTable"]["datasetId"] == (ANONYMOUS_RESULTS_DATASET)
+        discard_job_results("proj", "job-2")

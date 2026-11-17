@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from bqemulator.api.dependencies import AppContext
     from bqemulator.row_access.identity import CallerIdentity
+    from bqemulator.sql.translation_cache import TranslationCache
     from bqemulator.sql.translator import SQLTranslator
 
 
@@ -123,6 +124,7 @@ async def rewrite_and_translate_statement(
     ctx: AppContext,
     caller: CallerIdentity,
     translator: SQLTranslator,
+    cache: TranslationCache | None = None,
 ) -> str:
     """Run the canonical rewrite chain on one statement, returning DuckDB SQL.
 
@@ -145,6 +147,10 @@ async def rewrite_and_translate_statement(
     raised here, before the caller's ``try``, so an unsupported-feature
     error reaches the wire unwrapped as a ``501`` rather than being
     reshaped into a generic ``invalidQuery``.
+
+    With a ``cache`` the final translation step is looked up by its full
+    input (SQL, catalog schema, caller); every earlier pass still runs on
+    each call because they read live state.
     """
     # Refresh any stale materialized views this statement reads.
     await refresh_dependent_mvs(project_id, bq_sql, ctx)
@@ -166,11 +172,18 @@ async def rewrite_and_translate_statement(
     # ``AvgDecimalRule`` consults the annotated operand type to decide
     # whether to wrap ``AVG`` in a DECIMAL cast.
     schema_dict = build_catalog_schema(bq_sql, project_id=project_id, catalog=ctx.catalog)
-    match translator.translate(bq_sql, schema=schema_dict or None, caller=caller):
+    schema = schema_dict or None
+    if cache is not None:
+        cached = cache.get_translation(bq_sql, schema, caller)
+        if cached is not None:
+            return cached
+    match translator.translate(bq_sql, schema=schema, caller=caller):
         case Err(error):
             raise error
         case Ok(duckdb_sql):
             pass
+    if cache is not None:
+        cache.put_translation(bq_sql, schema, caller, duckdb_sql)
     return duckdb_sql
 
 

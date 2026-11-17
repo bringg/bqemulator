@@ -346,7 +346,7 @@ async def _run_load(
             end_time=now,
             etag=generate_etag(project_id, job_id, str(now)),
         )
-    ctx.catalog.upsert_job(job_meta)
+    await ctx.catalog.upsert_job_async(job_meta)
     return job_id, job_meta
 
 

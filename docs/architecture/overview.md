@@ -80,7 +80,8 @@ Imports flow **downward only**. Domain modules never import from adapters.
 5. FastAPI routes the request to a handler in `api/routes/jobs.py`.
 6. Handler constructs a `QueryJobCommand` and dispatches via
    `jobs/executor.py`.
-7. Executor invokes `SQLTranslator.translate()`, then awaits
+7. Executor invokes `SQLTranslator.translate()` (served from the
+   per-context translation cache for a repeated statement), then awaits
    `DuckDBEngine.fetch_arrow_off_loop()`, which runs the statement in a
    worker thread so the event loop keeps serving other requests.
 8. Result is converted to BigQuery REST JSON via `storage/arrow_bridge.py`.
@@ -95,7 +96,10 @@ Imports flow **downward only**. Domain modules never import from adapters.
   ([ADR 0049](../adr/0049-query-statements-off-event-loop.md)). Plain
   `SELECT` jobs run on a pool of further cursors, one per read thread
   (`BQEMU_QUERY_WORKERS`, default 4; `1` turns the pool off)
-  ([ADR 0050](../adr/0050-parallel-select-workers.md)).
+  ([ADR 0050](../adr/0050-parallel-select-workers.md)). Two more
+  single-thread lanes, each with its own cursor, copy the AUTO snapshot
+  after a DML query job and write job rows, so neither blocks the loop
+  ([ADR 0052](../adr/0052-maintenance-cursors-for-snapshots-and-job-rows.md)).
 - **Immutable domain models.** Every catalog entity is a frozen Pydantic
   model; mutation goes through `.model_copy(update=...)`.
 - **UTC-only timestamps.** DuckDB is opened with

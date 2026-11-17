@@ -27,6 +27,7 @@ class TestDefaults:
         assert s.metrics_enabled is True
         assert s.tracing_enabled is False
         assert s.admin_enabled is False
+        assert s.translation_cache_size == 2048
 
 
 class TestEnvironmentVariables:
@@ -36,6 +37,10 @@ class TestEnvironmentVariables:
         s = Settings()
         assert s.rest_port == 11111
         assert s.log_level is LogLevel.DEBUG
+
+    def test_translation_cache_size_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BQEMU_TRANSLATION_CACHE_SIZE", "0")
+        assert Settings().translation_cache_size == 0
 
     def test_persistence_mode_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("BQEMU_PERSISTENCE_MODE", "persistent")
@@ -89,3 +94,7 @@ class TestDuckDbPath:
     def test_import_mode_requires_data_dir(self) -> None:
         with pytest.raises(ValueError, match="data_dir"):
             Settings(persistence_mode=PersistenceMode.IMPORT).duckdb_path()
+
+    def test_rejects_negative_translation_cache_size(self) -> None:
+        with pytest.raises(Exception):
+            Settings(translation_cache_size=-1)

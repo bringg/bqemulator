@@ -71,6 +71,7 @@ from bqemulator.versioning.ddl import (
 
 if TYPE_CHECKING:
     from bqemulator.api.dependencies import AppContext
+    from bqemulator.sql.translation_cache import TranslationCache
 
 _log = get_logger(__name__)
 _translator = SQLTranslator()
@@ -383,6 +384,8 @@ async def execute_query_job(
     # single-SQL path. Best-effort: unparseable input returns ``""``
     # and the field is omitted.
     statement_type = "SCRIPT" if is_scripted else classify_statement_type(bq_sql)
+    # A plain SELECT is never DDL or DML, so the parses that detect those are skipped.
+    is_plain_select = not is_scripted and statement_type == "SELECT"
     ddl_operation: str | None = None
 
     if is_scripted:
@@ -409,24 +412,26 @@ async def execute_query_job(
         )
         if intercepted is not None:
             return intercepted
-        early_exit = await _run_query_fast_paths(
-            project_id=project_id,
-            job_id=job_id,
-            bq_sql=bq_sql,
-            statement_type=statement_type,
-            now=now,
-            ctx=ctx,
-        )
-        if early_exit is not None:
-            return early_exit
+        if not is_plain_select:
+            early_exit = await _run_query_fast_paths(
+                project_id=project_id,
+                job_id=job_id,
+                bq_sql=bq_sql,
+                statement_type=statement_type,
+                now=now,
+                ctx=ctx,
+            )
+            if early_exit is not None:
+                return early_exit
 
     # Refuse DML against immutable table types (SNAPSHOT,
     # MATERIALIZED_VIEW). BigQuery treats these as read-only.
-    _reject_dml_on_immutable(project_id, bq_sql, ctx)
+    if not is_plain_select:
+        _reject_dml_on_immutable(project_id, bq_sql, ctx)
 
     # Single-statement pre-execution guard + ``ddlOperationPerformed``
     # resolution (the scripted routine case was already resolved above).
-    if not is_scripted:
+    if not is_scripted and not is_plain_select:
         ddl_operation = _guard_and_resolve_single_ddl(bq_sql, statement_type, project_id, ctx)
 
     effective_caller = caller or CallerIdentity(
@@ -440,12 +445,14 @@ async def execute_query_job(
         ctx=ctx,
         is_scripted=is_scripted,
         effective_caller=effective_caller,
-        read_only=not is_scripted and statement_type == "SELECT",
+        read_only=is_plain_select,
+        ddl_sync=not is_plain_select,
     )
 
     # Capture snapshots for tables modified by this statement, and
     # propagate TableDataChanged so dependent MVs flip stale.
-    await _capture_dml_snapshots(project_id, bq_sql, ctx)
+    if not is_plain_select:
+        await _capture_dml_snapshots(project_id, bq_sql, ctx)
 
     arrow_table, num_dml_affected_rows, ddl_schema_fields = _finalize_statement_result(
         arrow_table,
@@ -479,7 +486,12 @@ async def execute_query_job(
         job_id=job_id,
         job_type="QUERY",
         state="DONE",
-        configuration=_build_query_configuration(bq_sql, project_id, job_id),
+        configuration=_build_query_configuration(
+            bq_sql,
+            project_id,
+            job_id,
+            detect_create_table=not is_plain_select,
+        ),
         statistics=statistics,
         creation_time=now,
         start_time=now,
@@ -709,6 +721,7 @@ async def _run_query_body(
     is_scripted: bool,
     effective_caller: CallerIdentity,
     read_only: bool = False,
+    ddl_sync: bool = True,
 ) -> pa.Table:
     """Execute ``bq_sql`` via the scripting interpreter or the legacy single-SQL path.
 
@@ -724,7 +737,7 @@ async def _run_query_body(
     catalog (``sync_dropped_object``) so the relation or dataset
     disappears from those same surfaces, matching BigQuery. A
     column-level ``ALTER TABLE`` refreshes the table's catalog schema
-    (``sync_altered_table``).
+    (``sync_altered_table``). ``ddl_sync=False`` skips all of these syncs.
     """
     if is_scripted:
         interpreter = ScriptInterpreter(ctx, project_id, caller=effective_caller)
@@ -737,11 +750,12 @@ async def _run_query_body(
         caller=effective_caller,
         read_only=read_only,
     )
-    sync_created_schema(bq_sql, project_id, ctx)
-    sync_created_table(bq_sql, project_id, ctx)
-    sync_created_view(bq_sql, project_id, ctx)
-    sync_dropped_object(bq_sql, project_id, ctx)
-    sync_altered_table(bq_sql, project_id, ctx)
+    if ddl_sync:
+        sync_created_schema(bq_sql, project_id, ctx)
+        sync_created_table(bq_sql, project_id, ctx)
+        sync_created_view(bq_sql, project_id, ctx)
+        sync_dropped_object(bq_sql, project_id, ctx)
+        sync_altered_table(bq_sql, project_id, ctx)
     return arrow_table
 
 
@@ -840,6 +854,8 @@ def _build_query_configuration(
     bq_sql: str,
     project_id: str,
     job_id: str,
+    *,
+    detect_create_table: bool = True,
 ) -> dict[str, Any]:
     """Return ``configuration`` for a finished QUERY job.
 
@@ -859,6 +875,8 @@ def _build_query_configuration(
     :func:`resolve_anonymous_result_job` maps it back to *job_id*;
     ``tables.get`` serves the job's row count + schema and
     ``tabledata.list`` serves its rows, both from ``JOB_RESULTS``.
+    ``detect_create_table=False`` skips the ``CREATE TABLE`` detection
+    and always takes the anonymous destination.
     """
     config: dict[str, Any] = {"query": {"query": bq_sql}}
     from bqemulator.catalog.ddl_sync import (
@@ -866,7 +884,7 @@ def _build_query_configuration(
         _split_target,
     )
 
-    target = _detect_plain_create_table(bq_sql)
+    target = _detect_plain_create_table(bq_sql) if detect_create_table else None
     if target is not None:
         p_id, d_id, t_id = _split_target(target, project_id)
         if d_id and t_id:
@@ -964,13 +982,14 @@ async def _run_single_sql(
         ctx=ctx,
         caller=caller,
         translator=_translator,
+        cache=ctx.translation_cache,
     )
     duckdb_sql = translated_sql
     try:
         # Table-ref qualification stays inside the try: a malformed-id
         # ValidationError from rewrite_table_refs is a pre-execution
         # domain error that must be shaped by translate_runtime_error.
-        duckdb_sql = rewrite_table_refs(translated_sql, project_id)
+        duckdb_sql = _qualify_table_refs(translated_sql, project_id, ctx.translation_cache)
         duckdb_sql, param_values = bind_parameters(duckdb_sql, query_params)
         return await ctx.engine.fetch_arrow_off_loop(
             duckdb_sql,
@@ -992,6 +1011,16 @@ async def _run_single_sql(
         raise translated from exc
     except Exception as exc:
         raise translate_runtime_error(exc, duckdb_sql=duckdb_sql) from exc
+
+
+def _qualify_table_refs(translated_sql: str, project_id: str, cache: TranslationCache) -> str:
+    """Return ``rewrite_table_refs`` output, served from *cache* when present."""
+    cached = cache.get_qualified(translated_sql, project_id)
+    if cached is not None:
+        return cached
+    qualified = rewrite_table_refs(translated_sql, project_id)
+    cache.put_qualified(translated_sql, project_id, qualified)
+    return qualified
 
 
 async def _run_script(
@@ -3045,7 +3074,8 @@ async def _capture_dml_snapshots(
     The snapshot manager publishes ``TableDataChanged`` as a side effect,
     which in turn marks dependent MVs stale. Capture is serialised
     through the write lock so concurrent writers don't interleave a
-    half-applied snapshot with a new DML.
+    half-applied snapshot with a new DML. The table copy runs on the
+    engine's snapshot lane, so the event loop stays free while it runs.
     """
     import sqlglot
 
@@ -3070,7 +3100,7 @@ async def _capture_dml_snapshots(
             if table_meta.table_type in ("SNAPSHOT", "MATERIALIZED_VIEW"):
                 ctx.events.publish(TableDataChanged(proj, dataset, table))
                 continue
-            ctx.snapshots.record_change(proj, dataset, table)
+            await ctx.snapshots.record_change_off_loop(proj, dataset, table)
 
 
 def _is_dml(tree: Any) -> bool:

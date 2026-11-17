@@ -77,6 +77,18 @@ class SafeDivideRule(TranslationRule):
 Adding a new rule is documented in
 [contributing/adding-sql-functions.md](contributing/adding-sql-functions.md).
 
+## Translation cache
+
+For a single-statement query, `AppContext.translation_cache` stores the
+result of the translation step, keyed by the BigQuery SQL after the rewrite
+passes, the catalog schema snapshot and the caller identity, and the result
+of table-reference qualification, keyed by the translated SQL and the
+project id. All rewrite passes before translation run on every call. Only
+successful results are stored. `BQEMU_TRANSLATION_CACHE_SIZE` sets the
+bound, and `0` turns the cache off
+([ADR 0051](../adr/0051-plain-select-fast-path-and-translation-cache.md)).
+`SQLTranslator.translate` must stay a pure function of its arguments.
+
 ## Parameter binding
 
 Query parameters (positional `?` and named `@name`) are bound through

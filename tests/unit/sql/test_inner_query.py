@@ -19,7 +19,13 @@ import pytest_asyncio
 from bqemulator.api.dependencies import AppContext
 from bqemulator.catalog.etag import generate_etag
 from bqemulator.catalog.memory_repository import MemoryCatalogRepository
-from bqemulator.catalog.models import DatasetMeta, MaterializedViewMeta, TableMeta
+from bqemulator.catalog.models import (
+    DatasetMeta,
+    MaterializedViewMeta,
+    TableFieldSchema,
+    TableMeta,
+    TableSchema,
+)
 from bqemulator.config import Settings
 from bqemulator.domain.clock import FrozenClock
 from bqemulator.domain.errors import InvalidQueryError
@@ -33,6 +39,7 @@ from bqemulator.sql.inner_query import (
     rewrite_and_translate_statement,
 )
 from bqemulator.sql.table_rewriter import rewrite_table_refs
+from bqemulator.sql.translation_cache import TranslationCache
 from bqemulator.sql.translator import SQLTranslator
 from bqemulator.storage.engine import DuckDBEngine
 from bqemulator.storage.sql_identifiers import quoted_schema, quoted_table_ref
@@ -312,3 +319,117 @@ async def test_rewrite_and_translate_statement_ok_branch_with_stub(
     # Table-ref qualification is the caller's step, so the helper returns
     # the translated SQL verbatim.
     assert result == "SELECT id FROM p.ds.t"
+
+
+class _CountingTranslator:
+    """Stub translator that records each call and emits a caller-specific literal."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[tuple[str, dict[str, object] | None, CallerIdentity | None]] = []
+        self._fail = fail
+
+    def translate(
+        self,
+        bq_sql: str,
+        *,
+        schema: dict[str, object] | None = None,
+        caller: CallerIdentity | None = None,
+        **_kwargs: object,
+    ) -> Ok | Err:
+        self.calls.append((bq_sql, schema, caller))
+        if self._fail:
+            return Err(InvalidQueryError("boom"))
+        who = caller.principal if caller else "none"
+        return Ok(f"{bq_sql} /* {who} */")
+
+
+async def _translate_cached(
+    ctx: AppContext,
+    translator: _CountingTranslator,
+    cache: TranslationCache | None,
+    *,
+    sql: str = "SELECT id FROM ds.t",
+    caller: CallerIdentity = _ANON,
+) -> str:
+    return await rewrite_and_translate_statement(
+        sql,
+        project_id="p",
+        ctx=ctx,
+        caller=caller,
+        translator=translator,  # type: ignore[arg-type]
+        cache=cache,
+    )
+
+
+async def test_cache_hit_skips_translate(ctx: AppContext, frozen_clock: FrozenClock) -> None:
+    _seed_table(ctx, frozen_clock)
+    translator = _CountingTranslator()
+    cache = TranslationCache(max_entries=8)
+    first = await _translate_cached(ctx, translator, cache)
+    second = await _translate_cached(ctx, translator, cache)
+    assert first == second
+    assert len(translator.calls) == 1
+
+
+async def test_cache_miss_on_changed_schema(ctx: AppContext, frozen_clock: FrozenClock) -> None:
+    _seed_table(ctx, frozen_clock)
+    translator = _CountingTranslator()
+    cache = TranslationCache(max_entries=8)
+    await _translate_cached(ctx, translator, cache)
+    ctx.catalog.update_table(
+        ctx.catalog.get_table("p", "ds", "t").model_copy(  # type: ignore[union-attr]
+            update={
+                "schema_": TableSchema(fields=(TableFieldSchema(name="id", type="INT64"),)),
+            },
+        ),
+    )
+    await _translate_cached(ctx, translator, cache)
+    assert len(translator.calls) == 2
+
+
+async def test_cache_miss_on_changed_caller(ctx: AppContext, frozen_clock: FrozenClock) -> None:
+    _seed_table(ctx, frozen_clock)
+    translator = _CountingTranslator()
+    cache = TranslationCache(max_entries=8)
+    other = CallerIdentity(principal="user:alice@example.com")
+    first = await _translate_cached(ctx, translator, cache)
+    second = await _translate_cached(ctx, translator, cache, caller=other)
+    assert first.endswith("/* user:anon@bqemulator.local */")
+    assert second.endswith("/* user:alice@example.com */")
+    assert len(translator.calls) == 2
+
+
+async def test_translation_error_is_not_cached(ctx: AppContext, frozen_clock: FrozenClock) -> None:
+    _seed_table(ctx, frozen_clock)
+    translator = _CountingTranslator(fail=True)
+    cache = TranslationCache(max_entries=8)
+    for _ in range(2):
+        with pytest.raises(InvalidQueryError):
+            await _translate_cached(ctx, translator, cache)
+    assert len(translator.calls) == 2
+    assert len(cache) == 0
+
+
+async def test_no_cache_keeps_translating_every_call(
+    ctx: AppContext,
+    frozen_clock: FrozenClock,
+) -> None:
+    _seed_table(ctx, frozen_clock)
+    translator = _CountingTranslator()
+    await _translate_cached(ctx, translator, None)
+    await _translate_cached(ctx, translator, None)
+    assert len(translator.calls) == 2
+
+
+async def test_mv_refresh_still_runs_on_cache_hit(
+    ctx: AppContext,
+    frozen_clock: FrozenClock,
+    refresh_calls: list[tuple[str, ...]],
+) -> None:
+    _register_mv(ctx, frozen_clock)
+    translator = _CountingTranslator()
+    cache = TranslationCache(max_entries=8)
+    await _translate_cached(ctx, translator, cache, sql="SELECT id FROM ds.mv")
+    await _translate_cached(ctx, translator, cache, sql="SELECT id FROM ds.mv")
+    assert len(translator.calls) == 1
+    assert refresh_calls == [("p", "ds", "mv"), ("p", "ds", "mv")]

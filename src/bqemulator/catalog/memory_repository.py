@@ -423,6 +423,18 @@ class MemoryCatalogRepository(CatalogRepository):
             raise resource_not_found(ResourceRef("job", project_id, resource_id=job_id))
         del self._jobs[key]
 
+    async def upsert_job_async(self, job: JobMeta) -> JobMeta:
+        return self.upsert_job(job)
+
+    async def delete_job_async(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        not_found_ok: bool = False,
+    ) -> None:
+        self.delete_job(project_id, job_id, not_found_ok=not_found_ok)
+
     # -- Snapshots -------------------------------------------------------
 
     def list_snapshots_for_table(

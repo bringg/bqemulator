@@ -16,6 +16,7 @@ from bqemulator.row_access.identity import (
     CallerIdentity,
     resolve_caller_from_headers,
 )
+from bqemulator.sql.translation_cache import TranslationCache
 from bqemulator.streaming.write_stream import WriteStreamManager
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -52,6 +53,9 @@ class AppContext:
     # composition root when the upload router is wired in. ``None`` in
     # contexts that don't need uploads (gRPC-only tests, unit fakes).
     upload_sessions: UploadSessionManager | None = None
+    # Cache of the pure translation steps of single-statement queries
+    # (ADR 0051). Defaults to an empty cache so directly built contexts work.
+    translation_cache: TranslationCache = field(default_factory=TranslationCache)
 
 
 def get_context(request: Request) -> AppContext:

@@ -280,7 +280,7 @@ async def query(
             error_result=error_result,
             now=ctx.clock.now(),
         )
-        ctx.catalog.upsert_job(job_meta)
+        await ctx.catalog.upsert_job_async(job_meta)
         return {
             "kind": "bigquery#queryResponse",
             "jobReference": {"projectId": project_id, "jobId": job_id},
@@ -298,7 +298,7 @@ async def query(
     config = _query_request_config(body)
     _merge_executor_config(config, job_meta.configuration)
     job_meta = job_meta.model_copy(update={"configuration": config})
-    ctx.catalog.upsert_job(job_meta)
+    await ctx.catalog.upsert_job_async(job_meta)
 
     arrow_table = JOB_RESULTS[job_id]
     rows = arrow_table_to_bq_rows(arrow_table, limit=max_results)
@@ -1264,7 +1264,7 @@ async def _build_dry_run_query_response(
     # the response so the client can chain a subsequent (non-dry-run)
     # job that references it.
     _attach_session_info(job_meta.statistics, session_id)
-    ctx.catalog.upsert_job(job_meta)
+    await ctx.catalog.upsert_job_async(job_meta)
     response = _build_job_response(project_id, job_id, job_meta, config)
     # Attach the schema preview so a ``jobs.getQueryResults`` poll could
     # surface it (rare; most dry-run callers use the sync ``jobs.query``
@@ -1514,7 +1514,7 @@ async def insert_job(
     # ``jobs.cancel`` render the same ``configuration`` as this response.
     _merge_executor_config(config, job_meta.configuration)
     job_meta = job_meta.model_copy(update={"configuration": config})
-    ctx.catalog.upsert_job(job_meta)
+    await ctx.catalog.upsert_job_async(job_meta)
     return _build_job_response(project_id, job_id, job_meta, config)
 
 
@@ -1677,7 +1677,7 @@ def cancel_job(
 
 
 @router.delete("/projects/{project_id}/jobs/{job_id}/delete")
-def delete_job_canonical(
+async def delete_job_canonical(
     project_id: str,
     job_id: str,
     ctx: _Ctx,
@@ -1689,19 +1689,19 @@ def delete_job_canonical(
     on the ``/delete``-suffixed path. The :func:`delete_job` alias
     below carries the short form for back-compat.
     """
-    ctx.catalog.delete_job(project_id, job_id)
+    await ctx.catalog.delete_job_async(project_id, job_id)
     discard_job_results(project_id, job_id)
     return {}
 
 
 @router.delete("/projects/{project_id}/jobs/{job_id}")
-def delete_job(
+async def delete_job(
     project_id: str,
     job_id: str,
     ctx: _Ctx,
 ) -> dict[str, Any]:
     """Delete a job (back-compat alias for the canonical ``/delete``-suffixed path)."""
-    ctx.catalog.delete_job(project_id, job_id)
+    await ctx.catalog.delete_job_async(project_id, job_id)
     discard_job_results(project_id, job_id)
     return {}
 

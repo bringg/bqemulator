@@ -34,6 +34,7 @@ from bqemulator.observability.logging_ import configure_logging, get_logger
 from bqemulator.observability.metrics import MetricsRegistry
 from bqemulator.observability.tracing import configure_tracing
 from bqemulator.row_access.policy import RowAccessPolicyManager
+from bqemulator.sql.translation_cache import TranslationCache
 from bqemulator.storage.engine import DuckDBEngine
 from bqemulator.streaming.write_stream import WriteStreamManager
 from bqemulator.udf.runtime import UDFRegistry
@@ -172,6 +173,9 @@ class EmulatorServer:
             row_access=row_access_manager,
             write_streams=write_stream_manager,
             upload_sessions=upload_session_manager,
+            translation_cache=TranslationCache(
+                max_entries=self._settings.translation_cache_size,
+            ),
         )
         # Hydrate routines from the catalog into DuckDB. Best-effort —
         # a broken routine in the catalog should not block startup.

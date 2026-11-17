@@ -10,6 +10,9 @@ the ``_bqemulator_snapshots`` DuckDB schema. The catalog keeps the
 expires_at)`` metadata; the lookup logic reads it to resolve
 ``FOR SYSTEM_TIME AS OF`` queries.
 
+:meth:`SnapshotManager.record_change_off_loop` takes the table copy off the
+event loop onto the engine's snapshot lane (ADR 0052).
+
 A periodic GC task drops ``AUTO`` snapshots past their retention.
 ``USER`` snapshots (the backing table of ``CREATE SNAPSHOT TABLE``)
 never expire automatically.
@@ -20,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING
 import uuid
 
@@ -28,9 +32,13 @@ from bqemulator.catalog.models import SnapshotMeta
 from bqemulator.domain.errors import OutOfRangeError, ValidationError
 from bqemulator.domain.events import TableDataChanged
 from bqemulator.observability.logging_ import get_logger
-from bqemulator.storage.sql_identifiers import quoted_table_ref
+from bqemulator.storage.sql_identifiers import quoted_table_ref, schema_name
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
+
+    import duckdb
+
     from bqemulator.catalog.repository import CatalogRepository
     from bqemulator.domain.clock import Clock
     from bqemulator.domain.events import EventBus
@@ -61,6 +69,7 @@ class SnapshotManager:
         self._clock = clock
         self._events = events
         self._retention_days = retention_days
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     # -- Capture ---------------------------------------------------------
 
@@ -125,6 +134,87 @@ class SnapshotManager:
         meta = self.capture(project_id, dataset_id, table_id, kind="AUTO")
         self._events.publish(TableDataChanged(project_id, dataset_id, table_id))
         return meta
+
+    async def record_change_off_loop(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+    ) -> SnapshotMeta | None:
+        """Like :meth:`record_change`, with the table copy off the event loop.
+
+        The copy runs on the engine's snapshot lane, which also reads
+        ``snapshot_time`` right before the copy starts. The catalog row and
+        the ``TableDataChanged`` event stay on the loop. Returns ``None``
+        (and still publishes) when the source table is gone, was dropped or
+        replaced during the copy, or the copy was cancelled.
+        """
+        try:
+            meta = await self._capture_off_loop(project_id, dataset_id, table_id)
+        except asyncio.CancelledError:
+            self._events.publish(TableDataChanged(project_id, dataset_id, table_id))
+            raise
+        self._events.publish(TableDataChanged(project_id, dataset_id, table_id))
+        return meta
+
+    async def _capture_off_loop(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str,
+    ) -> SnapshotMeta | None:
+        source = self._catalog.get_table(project_id, dataset_id, table_id)
+        if source is None:
+            return None
+        request = _CopyRequest()
+        try:
+            copied = await self._engine.run_on_snapshot_lane(
+                partial(
+                    _copy_table,
+                    self._clock,
+                    (project_id, dataset_id, table_id),
+                    request,
+                ),
+            )
+        except asyncio.CancelledError:
+            self._discard_copy(request)
+            raise
+        if copied is None:
+            return None
+        now, snapshot_id, copied_oid = copied
+        # The lane gave the loop back during the copy. A drop or a re-create
+        # of the source in between leaves the copy without a valid source: the
+        # DuckDB table id changes. A metadata-only update keeps it, and the
+        # copy stays valid.
+        current = self._catalog.get_table(project_id, dataset_id, table_id)
+        if (
+            current is None
+            or current.creation_time != source.creation_time
+            or _source_oid(self._engine.execute, project_id, dataset_id, table_id) != copied_oid
+        ):
+            self._discard_copy(request)
+            return None
+        meta = SnapshotMeta(
+            snapshot_id=snapshot_id,
+            project_id=project_id,
+            dataset_id=dataset_id,
+            table_id=table_id,
+            snapshot_time=now,
+            kind="AUTO",
+            duckdb_schema=SNAPSHOTS_SCHEMA,
+            duckdb_table=snapshot_id,
+            expires_at=now + timedelta(days=self._retention_days),
+        )
+        self._catalog.create_snapshot(meta)
+        return meta
+
+    def _discard_copy(self, request: _CopyRequest) -> None:
+        """Drop the copy table on the lane, after any copy still in flight."""
+        task = asyncio.ensure_future(
+            self._engine.run_on_snapshot_lane(partial(_drop_copy, request)),
+        )
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
 
     # -- Lookup ----------------------------------------------------------
 
@@ -249,6 +339,73 @@ class SnapshotManager:
             except Exception as exc:  # noqa: BLE001 — GC must never die
                 _log.warning("snapshot.gc.error", error=str(exc))
             await asyncio.sleep(interval_seconds)
+
+
+class _CopyRequest:
+    """State shared with the lane so a cancelled copy can be dropped afterwards."""
+
+    snapshot_id: str | None = None
+
+
+def _source_oid(
+    execute: Callable[..., duckdb.DuckDBPyConnection],
+    project_id: str,
+    dataset_id: str,
+    table_id: str,
+) -> int | None:
+    """Return the DuckDB object id of the source table or view, or ``None`` if it is gone.
+
+    The id stays the same across inserts and ``ALTER TABLE``, and changes when
+    the table is dropped and created again.
+    """
+    row = execute(
+        "SELECT oid FROM ("
+        "SELECT table_oid AS oid, schema_name, table_name FROM duckdb_tables() "
+        "UNION ALL SELECT view_oid, schema_name, view_name FROM duckdb_views()"
+        ") WHERE schema_name = ? AND table_name = ?",
+        [schema_name(project_id, dataset_id), table_id],
+    ).fetchone()
+    return None if row is None else int(row[0])
+
+
+def _copy_table(
+    clock: Clock,
+    source: tuple[str, str, str],
+    request: _CopyRequest,
+    cursor: duckdb.DuckDBPyConnection,
+) -> tuple[datetime, str, int] | None:
+    """Copy *source* into a new snapshot table; runs on the snapshot lane.
+
+    Reads the source's DuckDB object id in the same transaction as the copy.
+    Returns ``(snapshot_time, snapshot_id, source_oid)``, or ``None`` when the
+    source table no longer exists in DuckDB.
+    """
+    now = clock.now()
+    snapshot_id = _new_snapshot_id(now)
+    request.snapshot_id = snapshot_id
+    project_id, dataset_id, table_id = source
+    cursor.execute("BEGIN")
+    try:
+        oid = _source_oid(cursor.execute, project_id, dataset_id, table_id)
+        if oid is None:
+            cursor.execute("ROLLBACK")
+            return None
+        cursor.execute(
+            f'CREATE TABLE "{SNAPSHOTS_SCHEMA}"."{snapshot_id}" AS '
+            f"SELECT * FROM {quoted_table_ref(project_id, dataset_id, table_id)}",
+        )
+        cursor.execute("COMMIT")
+    except BaseException:
+        with contextlib.suppress(Exception):
+            cursor.execute("ROLLBACK")
+        raise
+    return now, snapshot_id, oid
+
+
+def _drop_copy(request: _CopyRequest, cursor: duckdb.DuckDBPyConnection) -> None:
+    """Drop the copy table of *request*, if its copy started; runs on the snapshot lane."""
+    if request.snapshot_id is not None:
+        cursor.execute(f'DROP TABLE IF EXISTS "{SNAPSHOTS_SCHEMA}"."{request.snapshot_id}"')
 
 
 def _new_snapshot_id(now: datetime) -> str:

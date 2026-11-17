@@ -125,6 +125,12 @@ class Settings(BaseSettings):
         le=64,
         description="Worker threads for read-only SELECT statements; 1 keeps one query thread.",
     )
+    translation_cache_size: int = Field(
+        default=2048,
+        ge=0,
+        le=100_000,
+        description="Translation cache entries (2 per statement); 0 disables it.",
+    )
     query_cache_ttl_seconds: int = Field(
         default=86400,
         ge=0,
