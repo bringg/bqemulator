@@ -15,8 +15,11 @@ from __future__ import annotations
 import pytest
 
 from bqemulator.jobs.executor import (
-    _ANONYMOUS_RESULTS_DATASET,
+    ANONYMOUS_RESULTS_DATASET,
     _build_query_configuration,
+    anonymous_result_table_id,
+    discard_job_results,
+    resolve_anonymous_result_job,
 )
 
 pytestmark = pytest.mark.unit
@@ -53,12 +56,16 @@ class TestBuildQueryConfiguration:
             project_id="proj",
             job_id="11111111-2222-3333-4444-555555555555",
         )
-        # Anonymous dataset; hyphens stripped from the job-id.
+        job_id = "11111111-2222-3333-4444-555555555555"
+        table_id = anonymous_result_table_id("proj", job_id)
         assert config["query"]["destinationTable"] == {
             "projectId": "proj",
-            "datasetId": _ANONYMOUS_RESULTS_DATASET,
-            "tableId": "anon11111111222233334444555555555555",
+            "datasetId": ANONYMOUS_RESULTS_DATASET,
+            "tableId": table_id,
         }
+        # The advertised table is registered, so it maps back to the job.
+        assert resolve_anonymous_result_job("proj", table_id) == job_id
+        discard_job_results("proj", job_id)
 
     def test_insert_falls_through_to_anonymous_destination(self) -> None:
         config = _build_query_configuration(
@@ -66,8 +73,11 @@ class TestBuildQueryConfiguration:
             project_id="proj",
             job_id="job-1",
         )
-        assert config["query"]["destinationTable"]["datasetId"] == (_ANONYMOUS_RESULTS_DATASET)
-        assert config["query"]["destinationTable"]["tableId"] == "anonjob1"
+        assert config["query"]["destinationTable"]["datasetId"] == (ANONYMOUS_RESULTS_DATASET)
+        assert config["query"]["destinationTable"]["tableId"] == (
+            anonymous_result_table_id("proj", "job-1")
+        )
+        discard_job_results("proj", "job-1")
 
     def test_query_text_is_preserved_verbatim(self) -> None:
         sql = "SELECT 1 AS n FROM `proj`.`ds`.`t`"
@@ -82,4 +92,4 @@ class TestBuildQueryConfiguration:
             project_id="proj",
             job_id="abc",
         )
-        assert config["query"]["destinationTable"]["datasetId"] == (_ANONYMOUS_RESULTS_DATASET)
+        assert config["query"]["destinationTable"]["datasetId"] == (ANONYMOUS_RESULTS_DATASET)

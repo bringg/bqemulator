@@ -46,6 +46,7 @@ from bqemulator.jobs.executor import (
     JOB_SCHEMAS,
     build_response_schema,
     classify_statement_type,
+    discard_job_results,
     execute_copy_job,
     execute_extract_job,
     execute_load_job,
@@ -275,7 +276,7 @@ async def query(
             project_id=project_id,
             job_id=job_id,
             job_type="QUERY",
-            config={"query": {"query": bq_sql}},
+            config=_query_request_config(body),
             error_result=error_result,
             now=ctx.clock.now(),
         )
@@ -290,6 +291,13 @@ async def query(
             "totalRows": "0",
             "errors": [error_result],
         }
+    # Store the request's configuration with the executor's
+    # ``destinationTable`` merged in, as ``jobs.insert`` does, so
+    # ``jobs.get`` / ``jobs.list`` render the same ``configuration``
+    # whichever route created the job.
+    config = _query_request_config(body)
+    _merge_executor_config(config, job_meta.configuration)
+    job_meta = job_meta.model_copy(update={"configuration": config})
     ctx.catalog.upsert_job(job_meta)
 
     arrow_table = JOB_RESULTS[job_id]
@@ -321,6 +329,38 @@ async def query(
     if total_rows > max_results:
         response["pageToken"] = str(max_results)
     return response
+
+
+#: ``QueryRequest`` fields that ``JobConfigurationQuery`` also carries.
+#: See https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query
+_QUERY_REQUEST_QUERY_FIELDS = (
+    "query",
+    "defaultDataset",
+    "useQueryCache",
+    "useLegacySql",
+    "parameterMode",
+    "queryParameters",
+    "connectionProperties",
+    "createSession",
+    "maximumBytesBilled",
+    "destinationEncryptionConfiguration",
+    "preserveNulls",
+)
+
+#: ``QueryRequest`` fields that ``JobConfiguration`` carries at its top level.
+_QUERY_REQUEST_JOB_FIELDS = ("labels", "jobTimeoutMs")
+
+
+def _query_request_config(body: dict[str, Any]) -> dict[str, Any]:
+    """Return the job ``configuration`` a ``jobs.query`` request describes.
+
+    Copies the ``QueryRequest`` fields that have a ``JobConfiguration``
+    counterpart; response-shaping fields (``maxResults``, ``timeoutMs``,
+    ``formatOptions``, ``location``, ...) are not job configuration.
+    """
+    config: dict[str, Any] = {key: body[key] for key in _QUERY_REQUEST_JOB_FIELDS if key in body}
+    config["query"] = {key: body[key] for key in _QUERY_REQUEST_QUERY_FIELDS if key in body}
+    return config
 
 
 def _attach_query_metadata(response: dict[str, Any], job_meta: JobMeta) -> None:
@@ -399,8 +439,7 @@ async def _dry_run_response(
         schema_fields = JOB_SCHEMAS.get(job_id, [])
         # Drop the recorded result so this dry-run doesn't leak rows
         # to a subsequent ``getQueryResults`` poll.
-        JOB_RESULTS.pop(job_id, None)
-        JOB_SCHEMAS.pop(job_id, None)
+        discard_job_results(project_id, job_id)
         captured = job_meta.statistics.get("query", {}).get("statementType")
         statement_type = captured or statement_type
     elif is_destructive:
@@ -1061,8 +1100,7 @@ async def _apply_write_append(
         )
     except _SQL_EXECUTION_DOMAIN_ERRORS:
         return job_meta
-    existing_table = JOB_RESULTS.pop(readback_job_id, None)
-    JOB_SCHEMAS.pop(readback_job_id, None)
+    existing_table = discard_job_results(project_id, readback_job_id)
     if existing_table is None:
         return job_meta
 
@@ -1467,13 +1505,16 @@ async def insert_job(
             "Job configuration must contain one of: query, load, extract, copy",
         )
 
-    ctx.catalog.upsert_job(job_meta)
     # Merge any executor-enriched configuration (e.g. the
     # ``destinationTable`` populated by ``_build_query_configuration``
     # in ``jobs.executor``) over the request's original config so
-    # client-side fields (``useLegacySql``, ``defaultDataset``, etc.)
-    # survive while the executor's additions still reach the wire.
+    # client-side fields (``useLegacySql``, ``labels``, etc.) survive
+    # while the executor's additions still reach the wire. The merged
+    # config is what the job stores, so ``jobs.get`` / ``jobs.list`` /
+    # ``jobs.cancel`` render the same ``configuration`` as this response.
     _merge_executor_config(config, job_meta.configuration)
+    job_meta = job_meta.model_copy(update={"configuration": config})
+    ctx.catalog.upsert_job(job_meta)
     return _build_job_response(project_id, job_id, job_meta, config)
 
 
@@ -1483,11 +1524,15 @@ def _merge_executor_config(
 ) -> None:
     """Overlay executor-set ``configuration`` keys onto the request's config.
 
-    Currently only the ``query.destinationTable`` slot is propagated —
-    the executor sets this for every successful QUERY job so REST
-    clients that fetch the destination metadata post-execution (e.g.
-    dbt-bigquery's ``client.get_table(query_job.destination)``) see a
-    real ref instead of ``None``. Mutates ``request_config`` in place.
+    Only the ``query.destinationTable`` slot is propagated — the
+    executor sets this for every successful QUERY job so REST clients
+    that fetch the destination metadata post-execution (e.g.
+    dbt-bigquery's ``client.get_table(query_job.destination)``) or read
+    the result rows through it (the Ruby client's ``QueryJob#data`` via
+    ``tabledata.list``) see a real ref instead of ``None``. A
+    caller-supplied destination wins; an explicit ``null`` (the Ruby
+    client serialises every unset field that way) counts as absent.
+    Mutates ``request_config`` in place.
     """
     if not executor_config:
         return
@@ -1496,7 +1541,8 @@ def _merge_executor_config(
     if not dest:
         return
     request_query = request_config.setdefault("query", {})
-    request_query.setdefault("destinationTable", dest)
+    if request_query.get("destinationTable") is None:
+        request_query["destinationTable"] = dest
 
 
 # ---------------------------------------------------------------------------
@@ -1644,8 +1690,7 @@ def delete_job_canonical(
     below carries the short form for back-compat.
     """
     ctx.catalog.delete_job(project_id, job_id)
-    JOB_RESULTS.pop(job_id, None)
-    JOB_SCHEMAS.pop(job_id, None)
+    discard_job_results(project_id, job_id)
     return {}
 
 
@@ -1657,8 +1702,7 @@ def delete_job(
 ) -> dict[str, Any]:
     """Delete a job (back-compat alias for the canonical ``/delete``-suffixed path)."""
     ctx.catalog.delete_job(project_id, job_id)
-    JOB_RESULTS.pop(job_id, None)
-    JOB_SCHEMAS.pop(job_id, None)
+    discard_job_results(project_id, job_id)
     return {}
 
 

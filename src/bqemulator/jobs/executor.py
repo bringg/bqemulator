@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import hashlib
 from math import ceil
 from pathlib import Path
 import re
@@ -781,10 +782,58 @@ def _finalize_statement_result(
 
 #: Dataset id under which bqemulator advertises anonymous-result tables.
 #: Real BigQuery uses ``_script<hash>`` for scripts and an internal
-#: per-job anonymous table for interactive queries; the
-#: ``api/routes/tables.py:get_table`` handler intercepts this dataset
-#: and synthesises a response from ``JOB_RESULTS``.
-_ANONYMOUS_RESULTS_DATASET = "_bqemu_anonymous"
+#: per-job anonymous table for interactive queries. The
+#: ``tables.get`` and ``tabledata.list`` handlers intercept this dataset
+#: and serve the job's ``JOB_RESULTS`` / ``JOB_SCHEMAS`` entries.
+ANONYMOUS_RESULTS_DATASET = "_bqemu_anonymous"
+
+#: Prefix of every anonymous-result ``tableId``.
+_ANONYMOUS_TABLE_PREFIX = "anon"
+
+#: ``(projectId, tableId)`` -> ``jobId`` for every anonymous-result table
+#: advertised in a job's ``configuration.query.destinationTable``. Filled
+#: by :func:`_build_query_configuration`; entries leave together with the
+#: job's ``JOB_RESULTS`` entry via :func:`discard_job_results`.
+_ANONYMOUS_RESULT_JOBS: dict[tuple[str, str], str] = {}
+
+
+def anonymous_result_table_id(project_id: str, job_id: str) -> str:
+    """Return the anonymous-result ``tableId`` advertised for *job_id*.
+
+    Job ids are client-chosen (UUIDs, the Ruby client's
+    ``job_<urlsafe-base64>``, arbitrary ``bq`` CLI strings) and may carry
+    characters a table id should not. The id is ``anon`` plus a SHA-256
+    digest of ``project_id:job_id``, so it is a plain identifier and two
+    distinct jobs never share one. The digest is one-way;
+    :func:`resolve_anonymous_result_job` maps it back.
+    """
+    digest = hashlib.sha256(f"{project_id}:{job_id}".encode()).hexdigest()
+    return f"{_ANONYMOUS_TABLE_PREFIX}{digest[:40]}"
+
+
+def is_anonymous_result_table(dataset_id: str, table_id: str) -> bool:
+    """Return whether ``dataset_id.table_id`` names an anonymous query-result table."""
+    return dataset_id == ANONYMOUS_RESULTS_DATASET and table_id.startswith(
+        _ANONYMOUS_TABLE_PREFIX,
+    )
+
+
+def resolve_anonymous_result_job(project_id: str, table_id: str) -> str | None:
+    """Return the id of the job whose results back ``project_id``'s anonymous *table_id*.
+
+    Returns ``None`` when no job in *project_id* advertised that table.
+    """
+    return _ANONYMOUS_RESULT_JOBS.get((project_id, table_id))
+
+
+def discard_job_results(project_id: str, job_id: str) -> pa.Table | None:
+    """Drop *job_id*'s stored result rows, schema and anonymous-table mapping.
+
+    Returns the dropped rows, or ``None`` when the job stored none.
+    """
+    JOB_SCHEMAS.pop(job_id, None)
+    _ANONYMOUS_RESULT_JOBS.pop((project_id, anonymous_result_table_id(project_id, job_id)), None)
+    return JOB_RESULTS.pop(job_id, None)
 
 
 def _build_query_configuration(
@@ -806,9 +855,10 @@ def _build_query_configuration(
     other query (``SELECT``, ``INSERT``, ``UPDATE``, ``DELETE``,
     ``MERGE``, etc.) the destination is a synthetic anonymous-result
     ref under the reserved
-    :data:`_ANONYMOUS_RESULTS_DATASET`; ``api/routes/tables.get_table``
-    fans that out by reading the job's row count + schema from
-    ``JOB_RESULTS``.
+    :data:`ANONYMOUS_RESULTS_DATASET`, registered so
+    :func:`resolve_anonymous_result_job` maps it back to *job_id*;
+    ``tables.get`` serves the job's row count + schema and
+    ``tabledata.list`` serves its rows, both from ``JOB_RESULTS``.
     """
     config: dict[str, Any] = {"query": {"query": bq_sql}}
     from bqemulator.catalog.ddl_sync import (
@@ -829,10 +879,12 @@ def _build_query_configuration(
 
     # Fall through: synthesise an anonymous destination so the wire
     # shape always carries a non-``None`` ``destinationTable``.
+    table_id = anonymous_result_table_id(project_id, job_id)
+    _ANONYMOUS_RESULT_JOBS[(project_id, table_id)] = job_id
     config["query"]["destinationTable"] = {
         "projectId": project_id,
-        "datasetId": _ANONYMOUS_RESULTS_DATASET,
-        "tableId": f"anon{job_id.replace('-', '')}",
+        "datasetId": ANONYMOUS_RESULTS_DATASET,
+        "tableId": table_id,
     }
     return config
 
@@ -3364,17 +3416,22 @@ def _parse_fallback_tables(body: str) -> list[Any]:
 
 
 __all__ = [
+    "ANONYMOUS_RESULTS_DATASET",
     "JOB_RESULTS",
     "JOB_SCHEMAS",
+    "anonymous_result_table_id",
     "build_response_schema",
+    "discard_job_results",
     "execute_copy_job",
     "execute_extract_job",
     "execute_load_job",
     "execute_query_job",
+    "is_anonymous_result_table",
     "parse_create_model",
     "parse_export_data",
     "preflight_create_model",
     "register_model",
+    "resolve_anonymous_result_job",
     "training_schema_sql",
     "write_export",
 ]
