@@ -35,6 +35,14 @@ Each job type is a `*JobCommand` in `bqemulator.jobs.commands/`:
 
 All share the signature `async execute(ctx: JobContext) -> JobResult`.
 
+## Plain SELECT fast path
+
+A single-statement `SELECT` skips the helpers that only act on DDL or DML
+(versioning and row-access DDL detection, the immutable-table guard, the
+catalog syncs and the snapshot capture), because each would parse the text
+again and return. Every other statement runs them
+([ADR 0051](../adr/0051-plain-select-fast-path-and-translation-cache.md)).
+
 ## Pagination
 
 Query results are held as `pyarrow.Table` on the `JobState`.

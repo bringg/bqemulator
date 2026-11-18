@@ -20,6 +20,7 @@ not pin them; the assertions here do.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -42,6 +43,7 @@ from bqemulator.jobs.executor import _run_single_sql
 from bqemulator.observability.metrics import MetricsRegistry
 from bqemulator.row_access.identity import CallerIdentity
 from bqemulator.row_access.policy import RowAccessPolicyManager
+from bqemulator.sql.translation_cache import TranslationCache
 from bqemulator.storage.engine import DuckDBEngine
 from bqemulator.udf.runtime import UDFRegistry
 from bqemulator.versioning.snapshots import SnapshotManager
@@ -127,6 +129,53 @@ async def test_qualification_validation_error_is_reshaped(
     # ValidationError that rewrite_table_refs raised.
     assert "Function not found" in str(excinfo.value)
     assert not isinstance(excinfo.value, ValidationError)
+
+
+async def test_qualification_error_is_not_cached(
+    ctx: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed qualification is raised again on the next identical run."""
+    calls = 0
+
+    def _raise_validation(*_args: object, **_kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        raise ValidationError("Invalid dataset id for SQL: 'bad.dataset'")
+
+    monkeypatch.setattr(executor, "rewrite_table_refs", _raise_validation)
+
+    for _ in range(2):
+        with pytest.raises(InvalidQueryError):
+            await _run_single_sql("p", "SELECT id FROM ds.t", None, ctx, caller=_ANON)
+    assert calls == 2
+
+
+async def test_repeated_statement_is_served_from_the_translation_cache(
+    ctx: AppContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second identical run skips translation and qualification."""
+    seen: list[str] = []
+    original = executor.rewrite_table_refs
+
+    def _spy(sql: str, project_id: str) -> str:
+        seen.append(sql)
+        return original(sql, project_id)
+
+    monkeypatch.setattr(executor, "rewrite_table_refs", _spy)
+
+    first = await _run_single_sql("p", "SELECT id FROM ds.t", None, ctx, caller=_ANON)
+    second = await _run_single_sql("p", "SELECT id FROM ds.t", None, ctx, caller=_ANON)
+    assert first.schema == second.schema
+    assert len(seen) == 1
+    assert len(ctx.translation_cache) == 2
+
+
+async def test_cache_size_zero_leaves_the_cache_empty(ctx: AppContext) -> None:
+    disabled = replace(ctx, translation_cache=TranslationCache(max_entries=0))
+    await _run_single_sql("p", "SELECT id FROM ds.t", None, disabled, caller=_ANON)
+    assert len(disabled.translation_cache) == 0
 
 
 async def test_unsupported_feature_translation_error_surfaces_unwrapped(

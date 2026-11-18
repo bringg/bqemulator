@@ -80,7 +80,8 @@ Imports flow **downward only**. Domain modules never import from adapters.
 5. FastAPI routes the request to a handler in `api/routes/jobs.py`.
 6. Handler constructs a `QueryJobCommand` and dispatches via
    `jobs/executor.py`.
-7. Executor invokes `SQLTranslator.translate()`, then awaits
+7. Executor invokes `SQLTranslator.translate()` (served from the
+   per-context translation cache for a repeated statement), then awaits
    `DuckDBEngine.fetch_arrow_off_loop()`, which runs the statement in a
    worker thread so the event loop keeps serving other requests.
 8. Result is converted to BigQuery REST JSON via `storage/arrow_bridge.py`.

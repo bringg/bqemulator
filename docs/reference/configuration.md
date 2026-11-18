@@ -31,6 +31,7 @@ Every setting can be provided three ways (priority high → low):
 | `BQEMU_MAX_CONCURRENT_JOBS` | — | `8` | Concurrency cap on query/load/extract/copy jobs |
 | `BQEMU_QUERY_CACHE_TTL_SECONDS` | — | `86400` | Query result cache TTL (0 disables) |
 | `BQEMU_QUERY_WORKERS` | — | `4` | Threads (1-64) that run plain `SELECT` jobs in parallel, one DuckDB cursor each. `1` runs every query on one thread in submission order. With more than `1`, a `SELECT` can finish before an earlier-submitted DML job that is still queued, and it does not see `TEMP` tables created by single-statement jobs. DML, DDL, scripts and loads never use the parallel threads |
+| `BQEMU_TRANSLATION_CACHE_SIZE` | — | `2048` | Entries (0-100000) in the cache of BigQuery-to-DuckDB translation results for single-statement queries. One statement uses up to 2 entries (the translation and the qualified SQL). `0` turns it off. Scripts do not use it |
 | `BQEMU_TIME_TRAVEL_RETENTION_DAYS` | — | `7` | Snapshot retention for time travel (0–90) |
 
 ## Observability
