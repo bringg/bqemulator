@@ -7,17 +7,13 @@ tests exercise the delegation path and the migration hook.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
-import threading
-from typing import Any
 
 import pytest
 
 from bqemulator.catalog.duckdb_repository import DuckDBCatalogRepository
 from bqemulator.catalog.models import (
     DatasetMeta,
-    JobMeta,
     MaterializedViewMeta,
     ModelMeta,
     RoutineMeta,
@@ -338,133 +334,5 @@ async def test_delete_dataset_cascades_through_persistent_tables(
         assert rebuilt.list_snapshots_for_table("p", "sales", "orders") == ()
         assert rebuilt.get_materialized_view("p", "sales", "orders_mv") is None
         assert rebuilt.list_models("p", "sales") == ()
-    finally:
-        await engine.stop()
-
-
-def _job(job_id: str = "j1", *, state: str = "DONE", etag: str = "e") -> JobMeta:
-    return JobMeta(
-        project_id="p",
-        job_id=job_id,
-        job_type="QUERY",
-        state=state,  # type: ignore[arg-type]
-        configuration={},
-        creation_time=NOW,
-        etag=etag,
-    )
-
-
-def _stored_job_rows(engine: DuckDBEngine) -> list[tuple[str, str, str]]:
-    return engine.execute(
-        'SELECT job_id, state, etag FROM "_bqemulator_catalog"."jobs" ORDER BY job_id',
-    ).fetchall()
-
-
-@pytest.mark.asyncio
-async def test_upsert_job_async_is_readable_at_once_and_persisted(
-    persistent_settings: Settings,
-) -> None:
-    engine = DuckDBEngine(persistent_settings)
-    await engine.start()
-    try:
-        repo = DuckDBCatalogRepository(engine)
-        task = asyncio.ensure_future(repo.upsert_job_async(_job("j1")))
-        # The cache is updated before the lane write is awaited.
-        await asyncio.sleep(0)
-        assert repo.get_job("p", "j1") == _job("j1")
-        assert await task == _job("j1")
-        assert _stored_job_rows(engine) == [("j1", "DONE", "e")]
-    finally:
-        await engine.stop()
-
-    reopened = DuckDBEngine(persistent_settings)
-    await reopened.start()
-    try:
-        assert DuckDBCatalogRepository(reopened).get_job("p", "j1") == _job("j1")
-    finally:
-        await reopened.stop()
-
-
-@pytest.mark.asyncio
-async def test_upsert_job_async_runs_on_the_job_lane(ephemeral_settings: Settings) -> None:
-    engine = DuckDBEngine(ephemeral_settings)
-    await engine.start()
-    try:
-        repo = DuckDBCatalogRepository(engine)
-        repo.ensure_ready()
-        threads: list[str] = []
-        original = engine.run_on_job_lane
-
-        async def spy(fn: Any) -> Any:
-            def wrapped(cursor: Any) -> Any:
-                threads.append(threading.current_thread().name)
-                return fn(cursor)
-
-            return await original(wrapped)
-
-        engine.run_on_job_lane = spy  # type: ignore[method-assign]
-        await repo.upsert_job_async(_job("j1"))
-        assert threads and all(name.startswith("bqemu-jobs") for name in threads)
-    finally:
-        await engine.stop()
-
-
-@pytest.mark.asyncio
-async def test_last_async_upsert_of_a_job_wins(persistent_settings: Settings) -> None:
-    engine = DuckDBEngine(persistent_settings)
-    await engine.start()
-    try:
-        repo = DuckDBCatalogRepository(engine)
-        await asyncio.gather(
-            repo.upsert_job_async(_job("j1", state="RUNNING", etag="e1")),
-            repo.upsert_job_async(_job("j1", state="DONE", etag="e2")),
-        )
-        assert _stored_job_rows(engine) == [("j1", "DONE", "e2")]
-    finally:
-        await engine.stop()
-
-
-@pytest.mark.asyncio
-async def test_upsert_then_delete_leaves_no_row(persistent_settings: Settings) -> None:
-    engine = DuckDBEngine(persistent_settings)
-    await engine.start()
-    try:
-        repo = DuckDBCatalogRepository(engine)
-        await asyncio.gather(
-            repo.upsert_job_async(_job("j1")),
-            repo.delete_job_async("p", "j1"),
-        )
-        assert repo.get_job("p", "j1") is None
-        assert _stored_job_rows(engine) == []
-    finally:
-        await engine.stop()
-
-
-@pytest.mark.asyncio
-async def test_delete_then_reupsert_keeps_the_row(persistent_settings: Settings) -> None:
-    engine = DuckDBEngine(persistent_settings)
-    await engine.start()
-    try:
-        repo = DuckDBCatalogRepository(engine)
-        await repo.upsert_job_async(_job("j1", etag="old"))
-        await asyncio.gather(
-            repo.delete_job_async("p", "j1"),
-            repo.upsert_job_async(_job("j1", etag="new")),
-        )
-        assert repo.get_job("p", "j1") == _job("j1", etag="new")
-        assert _stored_job_rows(engine) == [("j1", "DONE", "new")]
-    finally:
-        await engine.stop()
-
-
-@pytest.mark.asyncio
-async def test_delete_job_async_missing_job(ephemeral_settings: Settings) -> None:
-    engine = DuckDBEngine(ephemeral_settings)
-    await engine.start()
-    try:
-        repo = DuckDBCatalogRepository(engine)
-        with pytest.raises(NotFoundError):
-            await repo.delete_job_async("p", "missing")
-        await repo.delete_job_async("p", "missing", not_found_ok=True)
     finally:
         await engine.stop()

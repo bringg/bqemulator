@@ -26,7 +26,6 @@ entity lands in DuckDB.
 
 from __future__ import annotations
 
-from functools import partial
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -50,8 +49,6 @@ from bqemulator.observability.logging_ import get_logger
 from bqemulator.storage.engine import CATALOG_SCHEMA
 
 if TYPE_CHECKING:  # pragma: no cover
-    import duckdb
-
     from bqemulator.storage.engine import DuckDBEngine
 
 _log = get_logger(__name__)
@@ -780,36 +777,29 @@ class DuckDBCatalogRepository(CatalogRepository):
         had = self._cache.get_job(project_id, job_id) is not None
         self._cache.delete_job(project_id, job_id, not_found_ok=not_found_ok)
         if had:
-            _delete_job_row(project_id, job_id, self._engine.connection)
-
-    async def upsert_job_async(self, job: JobMeta) -> JobMeta:
-        """Upsert a job; the DuckDB row is written on the job lane.
-
-        The cache is updated before the first suspension, so a read right
-        after the call sees the job. Every write to the jobs table goes
-        through the one job lane, in call order.
-        """
-        self.ensure_ready()
-        upserted = self._cache.upsert_job(job)
-        await self._engine.run_on_job_lane(partial(_write_job_row, upserted))
-        return upserted
-
-    async def delete_job_async(
-        self,
-        project_id: str,
-        job_id: str,
-        *,
-        not_found_ok: bool = False,
-    ) -> None:
-        """Delete a job; the DuckDB row goes on the job lane, as in :meth:`upsert_job_async`."""
-        self.ensure_ready()
-        had = self._cache.get_job(project_id, job_id) is not None
-        self._cache.delete_job(project_id, job_id, not_found_ok=not_found_ok)
-        if had:
-            await self._engine.run_on_job_lane(partial(_delete_job_row, project_id, job_id))
+            self._engine.execute(
+                f'DELETE FROM "{CATALOG_SCHEMA}"."jobs" WHERE project_id = ? AND job_id = ?',
+                [project_id, job_id],
+            )
 
     def _write_job(self, job: JobMeta) -> None:
-        _write_job_row(job, self._engine.connection)
+        self._engine.execute(
+            f'INSERT OR REPLACE INTO "{CATALOG_SCHEMA}"."jobs" '
+            f"(project_id, job_id, job_type, state, metadata_json, "
+            f"creation_time, start_time, end_time, etag) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                job.project_id,
+                job.job_id,
+                job.job_type,
+                job.state,
+                job.model_dump_json(by_alias=True),
+                job.creation_time,
+                job.start_time,
+                job.end_time,
+                job.etag,
+            ],
+        )
 
     # ------------------------------------------------------------------
     # Snapshots
@@ -1094,35 +1084,6 @@ def _row_to_access_entry(row: tuple[Any, ...]) -> AccessEntry:
         view=_split_ref(row[9], parts=3),  # type: ignore[arg-type]
         routine=_split_ref(row[10], parts=3),  # type: ignore[arg-type]
         dataset=_split_ref(row[11], parts=2),  # type: ignore[arg-type]
-    )
-
-
-def _write_job_row(job: JobMeta, conn: duckdb.DuckDBPyConnection) -> None:
-    """Insert or replace the ``jobs`` row of *job* on *conn*."""
-    conn.execute(
-        f'INSERT OR REPLACE INTO "{CATALOG_SCHEMA}"."jobs" '
-        f"(project_id, job_id, job_type, state, metadata_json, "
-        f"creation_time, start_time, end_time, etag) "
-        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            job.project_id,
-            job.job_id,
-            job.job_type,
-            job.state,
-            job.model_dump_json(by_alias=True),
-            job.creation_time,
-            job.start_time,
-            job.end_time,
-            job.etag,
-        ],
-    )
-
-
-def _delete_job_row(project_id: str, job_id: str, conn: duckdb.DuckDBPyConnection) -> None:
-    """Delete the ``jobs`` row of ``project_id.job_id`` on *conn*."""
-    conn.execute(
-        f'DELETE FROM "{CATALOG_SCHEMA}"."jobs" WHERE project_id = ? AND job_id = ?',
-        [project_id, job_id],
     )
 
 

@@ -9,8 +9,6 @@ Query statements are the exception: :meth:`DuckDBEngine.fetch_arrow_off_loop`
 runs them on a second cursor of the same database, owned by a single worker
 thread, so a long query does not block the event loop (ADR 0049). Read-only
 statements can run on ``Settings.query_workers`` cursors in parallel (ADR 0050).
-Two more single-thread lanes, each with its own cursor, take the AUTO snapshot
-copy and the persistent job-row writes off the loop (ADR 0052).
 
 The engine also handles startup tasks:
 
@@ -29,21 +27,19 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 import queue
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from bqemulator.config import PersistenceMode, Settings
 from bqemulator.domain.errors import InternalError
 from bqemulator.observability.logging_ import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
 
     import duckdb
     import pyarrow as pa
 
 _log = get_logger(__name__)
-
-_T = TypeVar("_T")
 
 # Reserved schema name for bqemulator's own metadata tables. Users cannot
 # create datasets that collide with this (validated elsewhere).
@@ -81,10 +77,6 @@ class DuckDBEngine:
         self._read_executor: ThreadPoolExecutor | None = None
         self._read_cursors: queue.SimpleQueue[duckdb.DuckDBPyConnection] | None = None
         self._read_cursor_list: list[duckdb.DuckDBPyConnection] = []
-        self._snapshot_cursor: duckdb.DuckDBPyConnection | None = None
-        self._snapshot_executor: ThreadPoolExecutor | None = None
-        self._job_cursor: duckdb.DuckDBPyConnection | None = None
-        self._job_executor: ThreadPoolExecutor | None = None
         self._write_lock = asyncio.Lock()
         self._started = False
 
@@ -126,16 +118,6 @@ class DuckDBEngine:
                 max_workers=workers,
                 thread_name_prefix="bqemu-read",
             )
-        self._snapshot_cursor = self._connection.cursor()
-        self._snapshot_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="bqemu-snapshot",
-        )
-        self._job_cursor = self._connection.cursor()
-        self._job_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="bqemu-jobs",
-        )
         self._started = True
 
     async def stop(self) -> None:
@@ -146,19 +128,6 @@ class DuckDBEngine:
         if self._read_executor is not None:
             self._read_executor.shutdown(wait=True, cancel_futures=True)
             self._read_executor = None
-        # Maintenance work already queued is finished, not cancelled: a job
-        # row or a snapshot copy that was accepted must land.
-        if self._snapshot_executor is not None:
-            self._snapshot_executor.shutdown(wait=True)
-            self._snapshot_executor = None
-        if self._job_executor is not None:
-            self._job_executor.shutdown(wait=True)
-            self._job_executor = None
-        for maintenance_cursor in (self._snapshot_cursor, self._job_cursor):
-            if maintenance_cursor is not None:
-                maintenance_cursor.close()
-        self._snapshot_cursor = None
-        self._job_cursor = None
         for cursor in self._read_cursor_list:
             cursor.close()
         self._read_cursor_list = []
@@ -251,38 +220,6 @@ class DuckDBEngine:
             sql,
             parameters,
         )
-
-    async def run_on_snapshot_lane(
-        self,
-        fn: Callable[[duckdb.DuckDBPyConnection], _T],
-    ) -> _T:
-        """Run ``fn(cursor)`` on the snapshot lane and await its result.
-
-        The lane is one worker thread with its own cursor, so a long
-        snapshot copy neither blocks the event loop nor waits behind query
-        statements. Work runs one at a time, in submission order. Never
-        touch the main connection from ``fn``.
-        """
-        if self._snapshot_executor is None or self._snapshot_cursor is None:
-            raise InternalError("DuckDBEngine not started")
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._snapshot_executor, fn, self._snapshot_cursor)
-
-    async def run_on_job_lane(self, fn: Callable[[duckdb.DuckDBPyConnection], _T]) -> _T:
-        """Run ``fn(cursor)`` on the job-row lane and await its result.
-
-        Same shape as :meth:`run_on_snapshot_lane`, on its own thread and
-        cursor, so a job-row write never waits behind a snapshot copy. The
-        work is submitted before the first suspension, so submission order
-        is call order. Once submitted, the work completes even if the
-        awaiting task is cancelled.
-        """
-        if self._job_executor is None or self._job_cursor is None:
-            raise InternalError("DuckDBEngine not started")
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(self._job_executor, fn, self._job_cursor)
-        future.add_done_callback(_consume_result)
-        return await asyncio.shield(future)
 
     @asynccontextmanager
     async def write_lock(self) -> AsyncIterator[None]:
@@ -383,12 +320,6 @@ class DuckDBEngine:
             _log.warning("duckdb.avro_unavailable", error=str(exc))
             return
         _log.debug("duckdb.avro_loaded")
-
-
-def _consume_result(future: asyncio.Future[Any]) -> None:
-    """Mark a shielded lane future's outcome as retrieved so it is never logged as lost."""
-    if not future.cancelled():
-        future.exception()
 
 
 def _fetch_arrow(

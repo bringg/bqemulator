@@ -43,13 +43,6 @@ catalog syncs and the snapshot capture), because each would parse the text
 again and return. Every other statement runs them
 ([ADR 0051](../adr/0051-plain-select-fast-path-and-translation-cache.md)).
 
-## Persistence
-
-In persistent mode the job row is written to the catalog on a dedicated
-lane, awaited before the response is sent. Reads are served from the
-in-memory cache, which is updated first
-([ADR 0052](../adr/0052-maintenance-cursors-for-snapshots-and-job-rows.md)).
-
 ## Pagination
 
 Query results are held as `pyarrow.Table` on the `JobState`.

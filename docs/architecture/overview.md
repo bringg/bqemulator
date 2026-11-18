@@ -96,10 +96,7 @@ Imports flow **downward only**. Domain modules never import from adapters.
   ([ADR 0049](../adr/0049-query-statements-off-event-loop.md)). Plain
   `SELECT` jobs run on a pool of further cursors, one per read thread
   (`BQEMU_QUERY_WORKERS`, default 4; `1` turns the pool off)
-  ([ADR 0050](../adr/0050-parallel-select-workers.md)). Two more
-  single-thread lanes, each with its own cursor, copy the AUTO snapshot
-  after a DML query job and write job rows, so neither blocks the loop
-  ([ADR 0052](../adr/0052-maintenance-cursors-for-snapshots-and-job-rows.md)).
+  ([ADR 0050](../adr/0050-parallel-select-workers.md)).
 - **Immutable domain models.** Every catalog entity is a frozen Pydantic
   model; mutation goes through `.model_copy(update=...)`.
 - **UTC-only timestamps.** DuckDB is opened with

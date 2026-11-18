@@ -392,15 +392,3 @@ class TestJobRegistry:
         repo = MemoryCatalogRepository()
         with pytest.raises(NotFoundError):
             repo.delete_job("p", "j-1")
-
-    @pytest.mark.asyncio
-    async def test_async_upsert_and_delete_match_the_sync_calls(self) -> None:
-        repo = MemoryCatalogRepository()
-        job = self._make_job()
-        assert await repo.upsert_job_async(job) == job  # type: ignore[arg-type]
-        assert repo.get_job("p", "j-1") == job
-        await repo.delete_job_async("p", "j-1")
-        assert repo.get_job("p", "j-1") is None
-        await repo.delete_job_async("p", "j-1", not_found_ok=True)
-        with pytest.raises(NotFoundError):
-            await repo.delete_job_async("p", "j-1")

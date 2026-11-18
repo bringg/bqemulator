@@ -3074,8 +3074,7 @@ async def _capture_dml_snapshots(
     The snapshot manager publishes ``TableDataChanged`` as a side effect,
     which in turn marks dependent MVs stale. Capture is serialised
     through the write lock so concurrent writers don't interleave a
-    half-applied snapshot with a new DML. The table copy runs on the
-    engine's snapshot lane, so the event loop stays free while it runs.
+    half-applied snapshot with a new DML.
     """
     import sqlglot
 
@@ -3100,7 +3099,7 @@ async def _capture_dml_snapshots(
             if table_meta.table_type in ("SNAPSHOT", "MATERIALIZED_VIEW"):
                 ctx.events.publish(TableDataChanged(proj, dataset, table))
                 continue
-            await ctx.snapshots.record_change_off_loop(proj, dataset, table)
+            ctx.snapshots.record_change(proj, dataset, table)
 
 
 def _is_dml(tree: Any) -> bool:

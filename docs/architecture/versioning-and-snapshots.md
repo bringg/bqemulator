@@ -13,12 +13,6 @@ CREATE TABLE "_bqemulator_snapshots"."<iso_ts>_<proj>_<dataset>_<table>"
 AS SELECT * FROM "<proj>__<dataset>"."<table>";
 ```
 
-After a DML job, the table copy of an AUTO snapshot runs on the engine's
-snapshot lane, a worker thread with its own DuckDB cursor, under the write
-lock. The lane reads `snapshot_time` right before the copy starts. The catalog
-row and the `TableDataChanged` event stay on the event loop
-([ADR 0052](../adr/0052-maintenance-cursors-for-snapshots-and-job-rows.md)).
-
 The catalog records the snapshot and its `snapshot_time`. Snapshots
 older than `time_travel_retention_days` are garbage-collected by a
 periodic task.

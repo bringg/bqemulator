@@ -259,20 +259,6 @@ class CatalogRepository(Protocol):
         """Delete a job record (metadata only; job results handled separately)."""
         ...
 
-    async def upsert_job_async(self, job: JobMeta) -> JobMeta:
-        """Like :meth:`upsert_job`, without blocking the event loop on persistence."""
-        ...
-
-    async def delete_job_async(
-        self,
-        project_id: str,
-        job_id: str,
-        *,
-        not_found_ok: bool = False,
-    ) -> None:
-        """Like :meth:`delete_job`, without blocking the event loop on persistence."""
-        ...
-
     # -- Snapshots ---------------------------------------------
 
     def list_snapshots_for_table(
