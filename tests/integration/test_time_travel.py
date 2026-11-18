@@ -23,6 +23,7 @@ async def server() -> AsyncIterator[EmulatorServer]:
         persistence_mode=PersistenceMode.EPHEMERAL,
         rest_port=0,
         grpc_port=0,
+        auto_snapshots=True,
     )
     s = EmulatorServer(settings)
     await s.start()
@@ -49,6 +50,36 @@ async def client(server: EmulatorServer) -> AsyncIterator[httpx.AsyncClient]:
                         {"name": "val", "type": "STRING"},
                     ],
                 },
+            },
+        )
+        yield c
+
+
+@pytest_asyncio.fixture
+async def off_server() -> AsyncIterator[EmulatorServer]:
+    """A server with the default ``auto_snapshots=False``."""
+    s = EmulatorServer(
+        Settings(persistence_mode=PersistenceMode.EPHEMERAL, rest_port=0, grpc_port=0),
+    )
+    await s.start()
+    try:
+        yield s
+    finally:
+        await s.stop()
+
+
+@pytest_asyncio.fixture
+async def off_client(off_server: EmulatorServer) -> AsyncIterator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(base_url=off_server.rest_url, timeout=20.0) as c:
+        await c.post(
+            "/bigquery/v2/projects/p/datasets",
+            json={"datasetReference": {"projectId": "p", "datasetId": "ds"}},
+        )
+        await c.post(
+            "/bigquery/v2/projects/p/datasets/ds/tables",
+            json={
+                "tableReference": {"projectId": "p", "datasetId": "ds", "tableId": "t"},
+                "schema": {"fields": [{"name": "id", "type": "INT64"}]},
             },
         )
         yield c
@@ -144,3 +175,41 @@ async def test_time_travel_beyond_retention_returns_400(
     assert r.status_code == 200
     body = r.json()
     assert body["errors"][0]["reason"] == "outOfRange"
+
+
+async def test_time_travel_rejected_when_auto_snapshots_off(
+    off_server: EmulatorServer,
+    off_client: httpx.AsyncClient,
+) -> None:
+    """Without AUTO snapshots a time-travel query fails instead of reading the live table."""
+    await _run(off_client, "INSERT INTO ds.t VALUES (1)")
+    ctx = off_server._context  # type: ignore[attr-defined]
+    assert ctx.catalog.list_snapshots_for_table("p", "ds", "t") == ()
+
+    target = datetime.now(tz=UTC).isoformat(sep=" ", timespec="microseconds")
+    r = await off_client.post(
+        "/bigquery/v2/projects/p/queries",
+        json={
+            "query": f"SELECT id FROM ds.t FOR SYSTEM_TIME AS OF TIMESTAMP '{target}'",
+            "useLegacySql": False,
+        },
+    )
+
+    assert r.status_code == 200
+    error = r.json()["errors"][0]
+    assert error["reason"] == "invalidQuery"
+    assert "BQEMU_AUTO_SNAPSHOTS=true" in error["message"]
+    live = await _run(off_client, "SELECT id FROM ds.t")
+    assert _rows(live) == [["1"]]
+
+
+async def test_user_snapshot_table_works_when_auto_snapshots_off(
+    off_client: httpx.AsyncClient,
+) -> None:
+    await _run(off_client, "INSERT INTO ds.t VALUES (1)")
+    await _run(off_client, "CREATE SNAPSHOT TABLE ds.snap CLONE ds.t")
+    await _run(off_client, "INSERT INTO ds.t VALUES (2)")
+
+    snap = await _run(off_client, "SELECT id FROM ds.snap ORDER BY id")
+
+    assert _rows(snap) == [["1"]]

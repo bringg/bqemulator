@@ -3,9 +3,11 @@
 See ADR 0009 (snapshot-layer architecture) and ADR 0016 (POST-change
 capture + ``snapshot_time ≤ target`` lookup).
 
-Every successful DML or DDL that modifies a user table captures a
-snapshot by copying the current rows into a uniquely-named table in
-the ``_bqemulator_snapshots`` DuckDB schema. The catalog keeps the
+When ``auto_snapshots`` is on, every successful DML or DDL that
+modifies a user table captures a snapshot by copying the current rows
+into a uniquely-named table in the ``_bqemulator_snapshots`` DuckDB
+schema. With it off (the default) no ``AUTO`` snapshot is captured and
+``FOR SYSTEM_TIME AS OF`` is rejected. The catalog keeps the
 ``(snapshot_id, source project/dataset/table, snapshot_time, kind,
 expires_at)`` metadata; the lookup logic reads it to resolve
 ``FOR SYSTEM_TIME AS OF`` queries.
@@ -25,7 +27,7 @@ import uuid
 
 from bqemulator.catalog.migrations.m002_versioning import SNAPSHOTS_SCHEMA
 from bqemulator.catalog.models import SnapshotMeta
-from bqemulator.domain.errors import OutOfRangeError, ValidationError
+from bqemulator.domain.errors import InvalidQueryError, OutOfRangeError, ValidationError
 from bqemulator.domain.events import TableDataChanged
 from bqemulator.observability.logging_ import get_logger
 from bqemulator.storage.sql_identifiers import quoted_table_ref
@@ -55,12 +57,14 @@ class SnapshotManager:
         events: EventBus,
         *,
         retention_days: int,
+        auto_snapshots: bool = False,
     ) -> None:
         self._engine = engine
         self._catalog = catalog
         self._clock = clock
         self._events = events
         self._retention_days = retention_days
+        self._auto_snapshots = auto_snapshots
 
     # -- Capture ---------------------------------------------------------
 
@@ -120,9 +124,15 @@ class SnapshotManager:
 
         Central entry point invoked from every write path after a
         successful commit. The snapshot covers the *new* state of the
-        table (POST-change semantics per ADR 0016).
+        table (POST-change semantics per ADR 0016). With
+        ``auto_snapshots`` off, only the event is published and
+        ``None`` is returned.
         """
-        meta = self.capture(project_id, dataset_id, table_id, kind="AUTO")
+        meta = (
+            self.capture(project_id, dataset_id, table_id, kind="AUTO")
+            if self._auto_snapshots
+            else None
+        )
         self._events.publish(TableDataChanged(project_id, dataset_id, table_id))
         return meta
 
@@ -139,6 +149,7 @@ class SnapshotManager:
 
         Per ADR 0016:
 
+        * With ``auto_snapshots`` off, raise :class:`InvalidQueryError`.
         * ``target`` must be in ``[now - retention, now]``. Outside that
           window we raise :class:`OutOfRangeError`.
         * Return the snapshot with the *largest* ``snapshot_time <=
@@ -149,6 +160,10 @@ class SnapshotManager:
             * Otherwise raise :class:`OutOfRangeError` (target is before
               the table's first observable state).
         """
+        if not self._auto_snapshots:
+            raise InvalidQueryError(
+                "FOR SYSTEM_TIME AS OF needs AUTO snapshots: set BQEMU_AUTO_SNAPSHOTS=true",
+            )
         now = self._clock.now()
         if target.tzinfo is None:
             target = target.replace(tzinfo=UTC)

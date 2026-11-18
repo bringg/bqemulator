@@ -7,7 +7,8 @@ snapshot layer ([ADR 0009](../adr/0009-snapshot-layer-time-travel.md),
 
 ## Mental model
 
-Every successful DML or DDL on a base table captures a *post-change*
+Time travel is opt-in. Set `BQEMU_AUTO_SNAPSHOTS=true` to make every
+successful DML or DDL on a base table capture a *post-change*
 snapshot in the reserved `_bqemulator_snapshots` DuckDB schema. The
 catalog records the `snapshot_time` of each capture. Reads with
 `FOR SYSTEM_TIME AS OF T` walk backwards to find the most recent
@@ -19,6 +20,24 @@ window is bounded so storage costs stay predictable. `USER` snapshots
 created via `CREATE SNAPSHOT TABLE` never expire under retention.
 
 ## Time travel
+
+`FOR SYSTEM_TIME AS OF` needs `BQEMU_AUTO_SNAPSHOTS=true`. With the
+default (`false`) no snapshot is captured, and the query fails instead of
+reading the live table:
+
+```text
+"errors": [
+  {
+    "reason": "invalidQuery",
+    "message": "FOR SYSTEM_TIME AS OF needs AUTO snapshots: set BQEMU_AUTO_SNAPSHOTS=true"
+  }
+]
+```
+
+The error comes back in the query response (`status.errorResult` for a
+job). Client libraries raise `BadRequest` from it.
+
+With it on:
 
 ```sql
 -- State of the table 5 minutes ago.
@@ -88,12 +107,23 @@ Clones appear in `tables.list` with `tableType=CLONE`.
 
 | Setting | Env var | Default | Limits |
 |---|---|---|---|
+| AUTO snapshots | `BQEMU_AUTO_SNAPSHOTS` | `false` | `true` / `false` |
 | Retention window (days) | `BQEMU_TIME_TRAVEL_RETENTION_DAYS` | `7` | `0`–`90` |
 
-Setting retention to `0` disables time-travel queries (snapshots are
-captured and immediately garbage-collected). Setting it higher trades
-storage for a wider time-travel window — every DML produces a copy of
-the touched table.
+`BQEMU_AUTO_SNAPSHOTS` turns the snapshot capture on every write on or
+off. It does not affect `CREATE SNAPSHOT TABLE` or `CREATE TABLE … CLONE`.
+The retention window applies only when it is on. Setting retention to `0`
+makes time-travel queries unusable (snapshots are captured and
+immediately garbage-collected). Setting it higher trades storage for a
+wider time-travel window — every DML produces a copy of the touched
+table.
+
+Snapshots are captured only while `BQEMU_AUTO_SNAPSHOTS` is on. On a
+persistent data directory that was used with the setting on, then off,
+then on again, writes made while it was off have no snapshot. A
+`FOR SYSTEM_TIME AS OF` for a time in that period returns the last older
+snapshot, without an error. Do not trust time-travel results for such a
+period. Recreate the data directory to start a clean history.
 
 ## Limitations
 
@@ -101,8 +131,8 @@ the touched table.
   TIMESTAMP. The emulator handles literal timestamps natively and
   delegates non-literal expressions to DuckDB. `pytz` is required at
   the Python layer for the latter (declared as a runtime dependency).
-- Snapshot capture is full-table; storage cost is proportional to the
-  number of writes × retention. Documented as out-of-scope optimisation
+- Snapshot capture is full-table; storage cost and write latency grow
+  with the number of writes × table size, which is why it is opt-in. Documented as out-of-scope optimisation
   in [`docs/reference/out-of-scope.md`](../reference/out-of-scope.md).
 - `FOR SYSTEM_TIME AS OF` against a `MATERIALIZED_VIEW` is not
   supported — query the underlying base tables instead.

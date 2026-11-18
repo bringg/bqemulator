@@ -109,6 +109,7 @@ jobs:
             -e BQEMU_REST_PORT=9050 \
             -e BQEMU_GRPC_PORT=9060 \
             -e BQEMU_ADMIN_ENABLED=1 \
+            -e BQEMU_AUTO_SNAPSHOTS=true \
             -e BQEMU_GCS_LOCAL_ROOT=/var/lib/bqemu-gcs \
             "$BQEMU_IMAGE"
           # Wait up to 90s for /healthz to respond (headroom for slow
@@ -176,6 +177,7 @@ jobs:
             -e BQEMU_REST_PORT=9050 \
             -e BQEMU_GRPC_PORT=9060 \
             -e BQEMU_ADMIN_ENABLED=1 \
+            -e BQEMU_AUTO_SNAPSHOTS=true \
             -e BQEMU_GCS_LOCAL_ROOT=/var/lib/bqemu-gcs \
             "$BQEMU_IMAGE"
           for _ in $(seq 1 180); do
@@ -236,6 +238,7 @@ jobs:
             -e BQEMU_REST_PORT=9050 \
             -e BQEMU_GRPC_PORT=9060 \
             -e BQEMU_ADMIN_ENABLED=1 \
+            -e BQEMU_AUTO_SNAPSHOTS=true \
             -e BQEMU_GCS_LOCAL_ROOT=/var/lib/bqemu-gcs \
             "$BQEMU_IMAGE"
           for _ in $(seq 1 180); do

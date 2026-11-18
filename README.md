@@ -215,7 +215,7 @@ deprecations live ≥2 MINOR or 6 months. The [compatibility matrix](https://jjv
 | GoogleSQL function surface (date / time / string / array / struct / JSON / regex / aggregate / approx / civil-time / bit) | ✅ |
 | Procedural scripting (`DECLARE`, `BEGIN…END`, `IF`, `LOOP`, `EXCEPTION`, `BEGIN TRANSACTION`) | ✅ |
 | SQL / JavaScript / Table-valued UDFs | ✅ |
-| Time travel (`FOR SYSTEM_TIME AS OF`), snapshots, clones, materialized views | ✅ |
+| Time travel (`FOR SYSTEM_TIME AS OF`, opt-in with `BQEMU_AUTO_SNAPSHOTS=true`), snapshots, clones, materialized views | ✅ |
 | Authorized views + row access policies + caller identity | ✅ |
 | GEOGRAPHY / RANGE / INTERVAL / NUMERIC / BIGNUMERIC types | ✅ |
 | Load formats: CSV / JSON / Avro / ORC / Parquet | ✅ |
