@@ -65,6 +65,7 @@ pip install "bqemulator[udf-js]"       # JavaScript UDF support (embedded V8)
 pip install "bqemulator[orc]"          # ORC format for load jobs
 pip install "bqemulator[compression]"  # zstd + snappy for load/extract jobs
 pip install "bqemulator[import]"       # bqemulator import --from-project
+pip install "bqemulator[compiled]"     # compiled SQLGlot (sqlglotc): faster SQL parsing and translation
 pip install "bqemulator[all]"          # all runtime extras (no testing extras)
 ```
 

@@ -238,6 +238,7 @@ nav:
       - "0050 Run plain SELECT jobs on parallel read cursors": adr/0050-parallel-select-workers.md
       - "0051 Skip DDL/DML bookkeeping for plain SELECT jobs and cache translation": adr/0051-plain-select-fast-path-and-translation-cache.md
       - "0052 Capture AUTO snapshots only when asked": adr/0052-auto-snapshots-opt-in.md
+      - "0053 Use compiled SQLGlot and skip DDL-only helpers for plain DML jobs": adr/0053-compiled-sqlglot-and-plain-dml-fast-path.md
   - RFCs:
       - Overview: rfcs/README.md
       - "0001 EXPORT DATA statement (Cloud Storage)": rfcs/0001-export-data-statement.md

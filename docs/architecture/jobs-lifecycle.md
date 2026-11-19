@@ -43,6 +43,19 @@ catalog syncs and the snapshot capture), because each would parse the text
 again and return. Every other statement runs them
 ([ADR 0051](../adr/0051-plain-select-fast-path-and-translation-cache.md)).
 
+## Plain DML fast path
+
+A single-statement `INSERT`, `UPDATE`, `DELETE`, `MERGE` or `TRUNCATE TABLE`
+skips the helpers that only act on DDL: the versioning, row-access and routine
+drop DDL detection, the pre-execution DDL guard, the five catalog syncs and
+the `CREATE TABLE` detection of the job configuration. It still runs the
+immutable-table guard, the row-access rewrite, translation and the snapshot
+step, which publishes `TableDataChanged` for each target table and captures an
+`AUTO` snapshot only with `BQEMU_AUTO_SNAPSHOTS` on. The classification parse
+of the statement is shared with the immutable-table guard and the snapshot
+step. DML always runs on the write lane
+([ADR 0053](../adr/0053-compiled-sqlglot-and-plain-dml-fast-path.md)).
+
 ## Pagination
 
 Query results are held as `pyarrow.Table` on the `JobState`.
