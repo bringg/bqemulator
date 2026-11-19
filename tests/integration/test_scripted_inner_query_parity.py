@@ -37,6 +37,7 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
         persistence_mode=PersistenceMode.EPHEMERAL,
         rest_port=0,
         grpc_port=0,
+        auto_snapshots=True,
     )
     s = EmulatorServer(settings)
     await s.start()

@@ -100,6 +100,7 @@ def _build_chaos_context(engine: DuckDBEngine) -> AppContext:
             clock=clock,
             events=events,
             retention_days=7,
+            auto_snapshots=True,
         ),
         row_access=RowAccessPolicyManager(catalog=catalog, clock=clock),
         write_streams=WriteStreamManager(),
@@ -355,6 +356,7 @@ class TestTimeTravelReadWriteContention:
             persistence_mode=PersistenceMode.EPHEMERAL,
             rest_port=0,
             grpc_port=0,
+            auto_snapshots=True,
         )
         server = EmulatorServer(settings)
         await server.start()

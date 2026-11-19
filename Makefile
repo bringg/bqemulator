@@ -304,6 +304,7 @@ test-e2e-nodejs: docker-build ## E2E — Node.js client (live container)
 		-e BQEMU_REST_HOST=0.0.0.0 -e BQEMU_GRPC_HOST=0.0.0.0 \
 		-e BQEMU_REST_PORT=9050 -e BQEMU_GRPC_PORT=9060 \
 		-e BQEMU_ADMIN_ENABLED=1 \
+		-e BQEMU_AUTO_SNAPSHOTS=true \
 		-e BQEMU_GCS_LOCAL_ROOT=/var/lib/bqemu-gcs \
 		$(DOCKER_IMAGE):$(DOCKER_TAG) > /dev/null ; \
 	for _ in $$(seq 1 120); do \
@@ -326,6 +327,7 @@ test-e2e-go: docker-build ## E2E — Go client (live container)
 		-e BQEMU_REST_HOST=0.0.0.0 -e BQEMU_GRPC_HOST=0.0.0.0 \
 		-e BQEMU_REST_PORT=9050 -e BQEMU_GRPC_PORT=9060 \
 		-e BQEMU_ADMIN_ENABLED=1 \
+		-e BQEMU_AUTO_SNAPSHOTS=true \
 		-e BQEMU_GCS_LOCAL_ROOT=/var/lib/bqemu-gcs \
 		$(DOCKER_IMAGE):$(DOCKER_TAG) > /dev/null ; \
 	for _ in $$(seq 1 120); do \
@@ -349,6 +351,7 @@ test-e2e-java: docker-build ## E2E — Java client (live container)
 		-e BQEMU_REST_HOST=0.0.0.0 -e BQEMU_GRPC_HOST=0.0.0.0 \
 		-e BQEMU_REST_PORT=9050 -e BQEMU_GRPC_PORT=9060 \
 		-e BQEMU_ADMIN_ENABLED=1 \
+		-e BQEMU_AUTO_SNAPSHOTS=true \
 		-e BQEMU_GCS_LOCAL_ROOT=/var/lib/bqemu-gcs \
 		$(DOCKER_IMAGE):$(DOCKER_TAG) > /dev/null ; \
 	for _ in $$(seq 1 120); do \

@@ -17,6 +17,8 @@ full discovery / design rationale.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import sqlglot
 
@@ -159,3 +161,40 @@ class TestRewriteCreateTableSchemaCtas:
         assert "STRUCT" in out
         # The CAST wraps the struct value with the declared STRUCT type.
         assert "CAST(" in out
+
+
+class TestCreateKeywordGuard:
+    """A statement without the word ``CREATE`` is returned without a parse."""
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1",
+            "INSERT INTO ds.t (id, created_at) VALUES (1, CURRENT_TIMESTAMP())",
+            "UPDATE ds.t SET created = 1 WHERE id = 2",
+            "DELETE FROM ds.t WHERE id = 1",
+            "DROP TABLE ds.t",
+            "not sql (",
+        ],
+    )
+    def test_text_without_the_keyword_is_not_parsed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sql: str,
+    ) -> None:
+        parsed: list[str] = []
+        real_parse_one = sqlglot.parse_one
+
+        def counting_parse_one(text: str, **kwargs: Any) -> Any:
+            parsed.append(text)
+            return real_parse_one(text, **kwargs)
+
+        monkeypatch.setattr(sqlglot, "parse_one", counting_parse_one)
+        assert rewrite_create_table_schema_ctas(sql) == sql
+        assert parsed == []
+
+    def test_keyword_in_any_case_still_rewrites(self) -> None:
+        out = rewrite_create_table_schema_ctas(
+            "create table `p.ds.t` (id INT64) as select 1 as x",
+        )
+        assert "CAST(1 AS INT64) AS id" in out

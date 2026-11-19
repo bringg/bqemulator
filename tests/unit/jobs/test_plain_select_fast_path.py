@@ -92,6 +92,7 @@ async def ctx(ephemeral_settings: Settings) -> AsyncIterator[AppContext]:
             clock=clock,
             events=events,
             retention_days=7,
+            auto_snapshots=True,
         ),
         row_access=RowAccessPolicyManager(catalog=catalog, clock=clock),
     )

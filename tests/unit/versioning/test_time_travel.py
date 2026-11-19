@@ -7,9 +7,10 @@ from datetime import timedelta
 import pytest
 
 from bqemulator.api.dependencies import AppContext
-from bqemulator.domain.errors import OutOfRangeError
+from bqemulator.domain.errors import InvalidQueryError, OutOfRangeError
 from bqemulator.storage.sql_identifiers import quoted_table_ref
 from bqemulator.versioning.time_travel import rewrite_for_system_time
+from tests.conftest import build_snapshot_manager
 
 pytestmark = pytest.mark.unit
 
@@ -319,3 +320,38 @@ async def test_select_executes_against_snapshot(
     duckdb_sql = rewrite_table_refs(duckdb_sql, "p")
     rows = full_ctx.engine.execute(duckdb_sql).fetchall()
     assert rows == [(1,)]
+
+
+async def test_rejects_system_time_when_auto_snapshots_off(
+    full_ctx: AppContext,
+    make_dataset,
+    make_table,
+    frozen_clock,
+) -> None:
+    make_dataset("p", "ds")
+    make_table("p", "ds", "t")
+    off = build_snapshot_manager(
+        full_ctx.engine,
+        catalog=full_ctx.catalog,
+        clock=frozen_clock,
+        auto_snapshots=False,
+    )
+    target_iso = (frozen_clock.now() - timedelta(minutes=1)).isoformat(sep=" ")
+    sql = f"SELECT * FROM ds.t FOR SYSTEM_TIME AS OF TIMESTAMP '{target_iso}'"
+
+    with pytest.raises(InvalidQueryError, match="BQEMU_AUTO_SNAPSHOTS=true"):
+        rewrite_for_system_time(sql, "p", off, full_ctx.engine)
+
+
+async def test_plain_select_unaffected_when_auto_snapshots_off(
+    full_ctx: AppContext,
+    frozen_clock,
+) -> None:
+    off = build_snapshot_manager(
+        full_ctx.engine,
+        catalog=full_ctx.catalog,
+        clock=frozen_clock,
+        auto_snapshots=False,
+    )
+    sql = "SELECT * FROM ds.t"
+    assert rewrite_for_system_time(sql, "p", off, full_ctx.engine) == sql

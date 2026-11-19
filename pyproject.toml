@@ -192,8 +192,13 @@ compression = [
 import = [
     "google-cloud-bigquery>=3.0",
 ]
+compiled = [
+    # mypyc-compiled SQLGlot, faster per statement (ADR 0053). SQLGlot pins
+    # ``sqlglotc`` to its own version, so the extra shares its range.
+    "sqlglot[c]>=30.9,<30.12",
+]
 all = [
-    "bqemulator[avro,orc,udf-js,compression,import]",
+    "bqemulator[avro,orc,udf-js,compression,import,compiled]",
 ]
 testing = [
     # Floor on 9.0.3 to dodge CVE-2025-71176 in pytest 9.0.2 (path-

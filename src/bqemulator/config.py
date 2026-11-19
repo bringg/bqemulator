@@ -142,6 +142,13 @@ class Settings(BaseSettings):
         le=90,
         description="How long table snapshots are retained for time travel",
     )
+    auto_snapshots: bool = Field(
+        default=False,
+        description=(
+            "Capture a table snapshot on every write so FOR SYSTEM_TIME AS OF works; "
+            "off by default because each capture costs a table copy."
+        ),
+    )
     write_api_max_request_bytes: int = Field(
         default=10 * 1024 * 1024,
         ge=1024,

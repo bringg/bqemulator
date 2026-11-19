@@ -39,6 +39,7 @@ async def full_ctx(
         clock=frozen_clock,
         events=events,
         retention_days=ephemeral_settings.time_travel_retention_days,
+        auto_snapshots=True,
     )
     row_access = RowAccessPolicyManager(catalog=catalog, clock=frozen_clock)
     ctx = AppContext(

@@ -68,6 +68,7 @@ async def ctx(
         clock=frozen_clock,
         events=events,
         retention_days=ephemeral_settings.time_travel_retention_days,
+        auto_snapshots=True,
     )
     context = AppContext(
         settings=ephemeral_settings,

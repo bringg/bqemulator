@@ -61,6 +61,8 @@ def bqemu_container(
         image=image,
         gcs_local_root_host=str(bqemu_gcs_root_host),
     )
+    # The versioning scenarios use FOR SYSTEM_TIME AS OF, which needs AUTO snapshots.
+    container.with_env("BQEMU_AUTO_SNAPSHOTS", "true")
     container.start()
     try:
         yield container

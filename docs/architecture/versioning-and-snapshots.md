@@ -5,8 +5,9 @@ Implementation in `src/bqemulator/versioning/`. See
 
 ## Snapshot layer
 
-Every DDL/DML against a table triggers a snapshot capture (before the
-change) via `snapshots.py`:
+With `auto_snapshots` on (`BQEMU_AUTO_SNAPSHOTS=true`, default off), every
+DDL/DML against a table triggers a snapshot capture via `snapshots.py`.
+With it off, a write only publishes `TableDataChanged`:
 
 ```
 CREATE TABLE "_bqemulator_snapshots"."<iso_ts>_<proj>_<dataset>_<table>"
@@ -22,7 +23,9 @@ periodic task.
 `time_travel.py` rewrites `FOR SYSTEM_TIME AS OF <ts>` to read from the
 most recent snapshot whose `snapshot_time <= <ts>`. If no such snapshot
 exists (e.g. outside retention), the query errors with
-`OutOfRange: Invalid snapshot time`.
+`OutOfRange: Invalid snapshot time`. With `auto_snapshots` off, every
+`FOR SYSTEM_TIME AS OF` query errors with `InvalidQueryError` (reason
+`invalidQuery`; clients raise `BadRequest`) that names `BQEMU_AUTO_SNAPSHOTS`.
 
 ## Explicit snapshots
 

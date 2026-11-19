@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from bqemulator.api.dependencies import AppContext
@@ -12,6 +14,7 @@ from bqemulator.domain.errors import (
 )
 from bqemulator.storage.sql_identifiers import quoted_table_ref
 from bqemulator.versioning.snapshot_table import SnapshotTableManager
+from tests.conftest import build_snapshot_manager
 
 pytestmark = pytest.mark.unit
 
@@ -119,3 +122,30 @@ async def test_create_in_other_dataset(
         f"SELECT id FROM {quoted_table_ref('p', 'snaps', 't_2026_04_15')}",
     ).fetchall()
     assert rows == [(1,)]
+
+
+async def test_create_snapshot_table_works_with_auto_snapshots_off(
+    full_ctx: AppContext,
+    make_dataset,
+    make_table,
+) -> None:
+    """``CREATE SNAPSHOT TABLE`` is a USER snapshot and needs no AUTO snapshots."""
+    ctx = replace(
+        full_ctx,
+        snapshots=build_snapshot_manager(
+            full_ctx.engine,
+            catalog=full_ctx.catalog,
+            clock=full_ctx.clock,  # type: ignore[arg-type]
+            events=full_ctx.events,
+            auto_snapshots=False,
+        ),
+    )
+    make_dataset("p", "ds")
+    make_table("p", "ds", "t", rows=[(1, "a"), (2, "b")])
+
+    meta = await SnapshotTableManager(ctx).create("p", "ds", "snap_t", "p", "ds", "t")
+
+    assert meta.table_type == "SNAPSHOT"
+    assert meta.num_rows == 2
+    snaps = ctx.catalog.list_snapshots_for_table("p", "ds", "t")
+    assert [s.kind for s in snaps] == ["USER"]
