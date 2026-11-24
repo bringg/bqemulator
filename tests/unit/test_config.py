@@ -28,6 +28,7 @@ class TestDefaults:
         assert s.tracing_enabled is False
         assert s.admin_enabled is False
         assert s.translation_cache_size == 2048
+        assert s.auto_snapshots is False
 
 
 class TestEnvironmentVariables:
@@ -41,6 +42,12 @@ class TestEnvironmentVariables:
     def test_translation_cache_size_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BQEMU_TRANSLATION_CACHE_SIZE", "0")
         assert Settings().translation_cache_size == 0
+
+    def test_auto_snapshots_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BQEMU_AUTO_SNAPSHOTS", "true")
+        assert Settings().auto_snapshots is True
+        monkeypatch.setenv("BQEMU_AUTO_SNAPSHOTS", "false")
+        assert Settings().auto_snapshots is False
 
     def test_persistence_mode_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("BQEMU_PERSISTENCE_MODE", "persistent")

@@ -89,6 +89,16 @@ bound, and `0` turns the cache off
 ([ADR 0051](../adr/0051-plain-select-fast-path-and-translation-cache.md)).
 `SQLTranslator.translate` must stay a pure function of its arguments.
 
+## Compiled SQLGlot
+
+The `compiled` extra (included in `all` and in the Docker image) installs
+`sqlglotc`, the mypyc-compiled build of SQLGlot. It parses, transforms and
+generates SQL with the same results as the pure-Python package, faster. The
+code base does not subclass SQLGlot classes or assign attributes on them, so
+that it runs on both builds. The CTAS-with-schema pre-translator returns a
+statement without the word `CREATE` unchanged, without a parse
+([ADR 0053](../adr/0053-compiled-sqlglot-and-plain-dml-fast-path.md)).
+
 ## Parameter binding
 
 Query parameters (positional `?` and named `@name`) are bound through

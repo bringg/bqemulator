@@ -95,6 +95,28 @@ jobs:
       - name: Property tests
         run: uv run --no-sync pytest tests/property -m property
 
+  unit-pure-sqlglot:
+    name: Unit + property tests (pure-Python SQLGlot)
+    runs-on: ubuntu-latest
+    # ``--extra all`` installs compiled SQLGlot; a plain install does not,
+    # so this job removes ``sqlglotc`` and runs the same tiers (ADR 0053).
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+      - name: Install (locked, without sqlglotc)
+        run: |
+          uv sync --frozen --extra dev --extra all --python "3.11"
+          uv pip uninstall sqlglotc
+      - name: Activate project venv
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/prewarm-duckdb-extensions
+      - name: Unit tests
+        run: uv run --no-sync pytest tests/unit -m unit
+      - name: Property tests
+        run: uv run --no-sync pytest tests/property -m property
+
   integration:
     name: Integration tests
     runs-on: ubuntu-latest

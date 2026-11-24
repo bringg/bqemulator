@@ -60,6 +60,7 @@ def build_snapshot_manager(
     events: EventBus | None = None,
     *,
     retention_days: int = 7,
+    auto_snapshots: bool = True,
 ) -> SnapshotManager:
     """Shared builder used by the Phase 7 test suites."""
     return SnapshotManager(
@@ -68,6 +69,7 @@ def build_snapshot_manager(
         clock=clock or FrozenClock(datetime(2026, 4, 15, tzinfo=UTC)),
         events=events or EventBus(),
         retention_days=retention_days,
+        auto_snapshots=auto_snapshots,
     )
 
 

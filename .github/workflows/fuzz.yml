@@ -73,6 +73,9 @@ jobs:
           # resolve it. Pin it to an exact version here instead, bumped
           # deliberately, so the fuzz environment stays reproducible.
           uv pip install 'atheris==3.1.0'
+          # Atheris instruments Python bytecode only, so drop the compiled
+          # SQLGlot build to keep coverage inside the parser (ADR 0053).
+          uv pip uninstall sqlglotc
       - name: Run SQL translator harness (10 min)
         run: |
           python fuzz/fuzz_sql_translator.py \

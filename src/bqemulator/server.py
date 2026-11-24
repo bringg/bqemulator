@@ -138,6 +138,7 @@ class EmulatorServer:
             clock=self._clock,
             events=self._events,
             retention_days=self._settings.time_travel_retention_days,
+            auto_snapshots=self._settings.auto_snapshots,
         )
         row_access_manager = RowAccessPolicyManager(
             catalog=self._catalog,

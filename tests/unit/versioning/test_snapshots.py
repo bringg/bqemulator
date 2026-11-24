@@ -13,7 +13,7 @@ from bqemulator.catalog.etag import generate_etag
 from bqemulator.catalog.memory_repository import MemoryCatalogRepository
 from bqemulator.catalog.models import DatasetMeta, TableMeta
 from bqemulator.domain.clock import FrozenClock
-from bqemulator.domain.errors import OutOfRangeError
+from bqemulator.domain.errors import InvalidQueryError, OutOfRangeError
 from bqemulator.domain.events import EventBus, TableDataChanged
 from bqemulator.storage.engine import DuckDBEngine
 from bqemulator.storage.sql_identifiers import quoted_schema, quoted_table_ref
@@ -149,6 +149,135 @@ async def test_record_change_publishes_event(
     assert received[0].project_id == "p"
     assert received[0].dataset_id == "ds"
     assert received[0].table_id == "t"
+
+
+async def test_record_change_with_auto_snapshots_captures_and_publishes(
+    engine: DuckDBEngine,
+    catalog: MemoryCatalogRepository,
+    frozen_clock: FrozenClock,
+    manager: SnapshotManager,
+) -> None:
+    now = frozen_clock.now()
+    _make_dataset(catalog, "p", "ds", now)
+    _make_table(catalog, "p", "ds", "t", now)
+    _create_physical_table(engine, "p", "ds", "t")
+
+    meta = manager.record_change("p", "ds", "t")
+
+    assert meta is not None
+    assert meta.kind == "AUTO"
+    assert [s.snapshot_id for s in catalog.list_snapshots_for_table("p", "ds", "t")] == [
+        meta.snapshot_id
+    ]
+
+
+async def test_record_change_without_auto_snapshots_skips_capture_but_publishes(
+    engine: DuckDBEngine,
+    catalog: MemoryCatalogRepository,
+    frozen_clock: FrozenClock,
+) -> None:
+    received: list[TableDataChanged] = []
+    bus = EventBus()
+    bus.subscribe(TableDataChanged, received.append)  # type: ignore[arg-type]
+    manager = build_snapshot_manager(
+        engine,
+        catalog=catalog,
+        clock=frozen_clock,
+        events=bus,
+        auto_snapshots=False,
+    )
+    now = frozen_clock.now()
+    _make_dataset(catalog, "p", "ds", now)
+    _make_table(catalog, "p", "ds", "t", now)
+    _create_physical_table(engine, "p", "ds", "t")
+
+    assert manager.record_change("p", "ds", "t") is None
+
+    assert catalog.list_snapshots_for_table("p", "ds", "t") == ()
+    assert len(received) == 1
+    assert received[0].table_id == "t"
+    tables = engine.execute(
+        "SELECT count(*) FROM duckdb_tables() WHERE schema_name = '_bqemulator_snapshots'",
+    ).fetchone()
+    assert tables is not None and tables[0] == 0
+
+
+async def test_manager_defaults_to_auto_snapshots_off(
+    engine: DuckDBEngine,
+    frozen_clock: FrozenClock,
+) -> None:
+    manager = SnapshotManager(
+        engine=engine,
+        catalog=MemoryCatalogRepository(),
+        clock=frozen_clock,
+        events=EventBus(),
+        retention_days=7,
+    )
+    with pytest.raises(InvalidQueryError):
+        manager.resolve_time_travel("p", "ds", "t", frozen_clock.now())
+
+
+async def test_resolve_time_travel_without_auto_snapshots_raises_invalid_query(
+    engine: DuckDBEngine,
+    catalog: MemoryCatalogRepository,
+    frozen_clock: FrozenClock,
+) -> None:
+    manager = build_snapshot_manager(
+        engine,
+        catalog=catalog,
+        clock=frozen_clock,
+        auto_snapshots=False,
+    )
+    now = frozen_clock.now()
+    _make_dataset(catalog, "p", "ds", now)
+    _make_table(catalog, "p", "ds", "t", now)
+    _create_physical_table(engine, "p", "ds", "t")
+    # A USER snapshot must not make time travel answer when AUTO snapshots are off.
+    manager.capture("p", "ds", "t", kind="USER")
+
+    with pytest.raises(InvalidQueryError, match="BQEMU_AUTO_SNAPSHOTS=true"):
+        manager.resolve_time_travel("p", "ds", "t", now)
+
+
+async def test_user_snapshot_capture_works_without_auto_snapshots(
+    engine: DuckDBEngine,
+    catalog: MemoryCatalogRepository,
+    frozen_clock: FrozenClock,
+) -> None:
+    manager = build_snapshot_manager(
+        engine,
+        catalog=catalog,
+        clock=frozen_clock,
+        auto_snapshots=False,
+    )
+    now = frozen_clock.now()
+    _make_dataset(catalog, "p", "ds", now)
+    _make_table(catalog, "p", "ds", "t", now)
+    _create_physical_table(engine, "p", "ds", "t")
+    engine.execute(f"INSERT INTO {quoted_table_ref('p', 'ds', 't')} VALUES (1, 'a')")
+
+    snap = manager.capture("p", "ds", "t", kind="USER")
+
+    assert snap is not None
+    assert snap.expires_at is None
+    rows = engine.execute(
+        f'SELECT * FROM "{snap.duckdb_schema}"."{snap.duckdb_table}"',
+    ).fetchall()
+    assert rows == [(1, "a")]
+
+
+async def test_purge_expired_runs_without_auto_snapshots(
+    engine: DuckDBEngine,
+    catalog: MemoryCatalogRepository,
+    frozen_clock: FrozenClock,
+) -> None:
+    manager = build_snapshot_manager(
+        engine,
+        catalog=catalog,
+        clock=frozen_clock,
+        auto_snapshots=False,
+    )
+    assert manager.purge_expired() == 0
 
 
 async def test_resolve_time_travel_future_target_rejected(

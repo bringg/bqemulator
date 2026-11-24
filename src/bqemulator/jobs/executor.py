@@ -383,9 +383,15 @@ async def execute_query_job(
     # versioning-DDL fast path, the scripting path, and the legacy
     # single-SQL path. Best-effort: unparseable input returns ``""``
     # and the field is omitted.
-    statement_type = "SCRIPT" if is_scripted else classify_statement_type(bq_sql)
+    statement_tree: Any | None = None
+    if is_scripted:
+        statement_type = "SCRIPT"
+    else:
+        statement_type, statement_tree = _classify_statement(bq_sql)
     # A plain SELECT is never DDL or DML, so the parses that detect those are skipped.
     is_plain_select = not is_scripted and statement_type == "SELECT"
+    # A plain DML statement is never DDL, so the helpers that detect DDL are skipped.
+    skip_ddl_helpers = is_plain_select or (not is_scripted and statement_type in _PLAIN_DML_TYPES)
     ddl_operation: str | None = None
 
     if is_scripted:
@@ -412,7 +418,7 @@ async def execute_query_job(
         )
         if intercepted is not None:
             return intercepted
-        if not is_plain_select:
+        if not skip_ddl_helpers:
             early_exit = await _run_query_fast_paths(
                 project_id=project_id,
                 job_id=job_id,
@@ -427,11 +433,11 @@ async def execute_query_job(
     # Refuse DML against immutable table types (SNAPSHOT,
     # MATERIALIZED_VIEW). BigQuery treats these as read-only.
     if not is_plain_select:
-        _reject_dml_on_immutable(project_id, bq_sql, ctx)
+        _reject_dml_on_immutable(project_id, bq_sql, ctx, tree=statement_tree)
 
     # Single-statement pre-execution guard + ``ddlOperationPerformed``
     # resolution (the scripted routine case was already resolved above).
-    if not is_scripted and not is_plain_select:
+    if not is_scripted and not skip_ddl_helpers:
         ddl_operation = _guard_and_resolve_single_ddl(bq_sql, statement_type, project_id, ctx)
 
     effective_caller = caller or CallerIdentity(
@@ -446,13 +452,13 @@ async def execute_query_job(
         is_scripted=is_scripted,
         effective_caller=effective_caller,
         read_only=is_plain_select,
-        ddl_sync=not is_plain_select,
+        ddl_sync=not skip_ddl_helpers,
     )
 
     # Capture snapshots for tables modified by this statement, and
     # propagate TableDataChanged so dependent MVs flip stale.
     if not is_plain_select:
-        await _capture_dml_snapshots(project_id, bq_sql, ctx)
+        await _capture_dml_snapshots(project_id, bq_sql, ctx, tree=statement_tree)
 
     arrow_table, num_dml_affected_rows, ddl_schema_fields = _finalize_statement_result(
         arrow_table,
@@ -490,7 +496,7 @@ async def execute_query_job(
             bq_sql,
             project_id,
             job_id,
-            detect_create_table=not is_plain_select,
+            detect_create_table=not skip_ddl_helpers,
         ),
         statistics=statistics,
         creation_time=now,
@@ -3038,20 +3044,19 @@ def _reject_dml_on_immutable(
     project_id: str,
     bq_sql: str,
     ctx: AppContext,
+    *,
+    tree: Any | None = None,
 ) -> None:
     """Refuse DML targeting a SNAPSHOT or MATERIALIZED_VIEW table.
 
     BigQuery rejects writes to those table types — the emulator must
     surface the same error so user code that relies on the immutability
-    invariant doesn't silently corrupt data.
+    invariant doesn't silently corrupt data. ``tree`` is the already
+    parsed ``bq_sql``; without it the statement is parsed here.
     """
-    import sqlglot
-
-    try:
-        tree = sqlglot.parse_one(bq_sql, read="bigquery")
-    except Exception:  # noqa: BLE001 — non-DML or unparseable; nothing to do
-        return
-    if not _is_dml(tree):
+    if tree is None:
+        tree = _parse_dml_candidate(bq_sql)
+    if tree is None or not _is_dml(tree):
         return
     for proj, dataset, table in _dml_target_tables(tree, project_id):
         meta = ctx.catalog.get_table(proj, dataset, table)
@@ -3068,21 +3073,20 @@ async def _capture_dml_snapshots(
     project_id: str,
     bq_sql: str,
     ctx: AppContext,
+    *,
+    tree: Any | None = None,
 ) -> None:
     """Snapshot every table modified by ``bq_sql`` (POST-change).
 
     The snapshot manager publishes ``TableDataChanged`` as a side effect,
     which in turn marks dependent MVs stale. Capture is serialised
     through the write lock so concurrent writers don't interleave a
-    half-applied snapshot with a new DML.
+    half-applied snapshot with a new DML. ``tree`` is the already parsed
+    ``bq_sql``; without it the statement is parsed here.
     """
-    import sqlglot
-
-    try:
-        tree = sqlglot.parse_one(bq_sql, read="bigquery")
-    except Exception:  # noqa: BLE001 — non-DML or unparseable; nothing to do
-        return
-    if not _is_dml(tree):
+    if tree is None:
+        tree = _parse_dml_candidate(bq_sql)
+    if tree is None or not _is_dml(tree):
         return
 
     targets = _dml_target_tables(tree, project_id)
@@ -3100,6 +3104,16 @@ async def _capture_dml_snapshots(
                 ctx.events.publish(TableDataChanged(proj, dataset, table))
                 continue
             ctx.snapshots.record_change(proj, dataset, table)
+
+
+def _parse_dml_candidate(bq_sql: str) -> Any | None:
+    """Parse ``bq_sql`` in the BigQuery dialect; ``None`` when SQLGlot cannot parse it."""
+    import sqlglot
+
+    try:
+        return sqlglot.parse_one(bq_sql, read="bigquery")
+    except Exception:  # noqa: BLE001 — non-DML or unparseable; nothing to do
+        return None
 
 
 def _is_dml(tree: Any) -> bool:
@@ -3132,6 +3146,10 @@ _DML_STATEMENTS = frozenset({"INSERT", "UPDATE", "DELETE", "MERGE"})
 #: row count and **no** ``ddlOperationPerformed`` (pinned by
 #: ``rest_crud/ddl_result_truncate_table``).
 _COUNT_TRIMMED_STATEMENTS = _DML_STATEMENTS | {"TRUNCATE_TABLE"}
+
+#: Single statements that are DML on the wire and never DDL: the DDL-only
+#: helpers of the query path are skipped for them (ADR 0053).
+_PLAIN_DML_TYPES = _COUNT_TRIMMED_STATEMENTS
 
 #: DDL whose job result is fully empty — no schema, no rows (pinned by
 #: ``rest_crud/ddl_result_{alter_table_add_column,create_schema,
@@ -3230,13 +3248,23 @@ def classify_statement_type(bq_sql: str) -> str:
     Falls back to ``""`` rather than guessing for unparseable input so
     a malformed query doesn't get a misleading classification.
     """
+    return _classify_statement(bq_sql)[0]
+
+
+def _classify_statement(bq_sql: str) -> tuple[str, Any | None]:
+    """Return ``(statementType, parsed tree)`` for ``bq_sql``.
+
+    The tree is the single ``sqlglot.parse_one`` result of the classification,
+    so callers that need the same parse reuse it. It is ``None`` for row access
+    policy DDL (classified by regex) and for unparseable SQL.
+    """
     rap_type = _classify_rap_ddl(bq_sql)
     if rap_type:
-        return rap_type
+        return rap_type, None
     tree = _parse_for_classification(bq_sql)
     if tree is None:
-        return ""
-    return _classify_parsed_tree(tree)
+        return "", None
+    return _classify_parsed_tree(tree), tree
 
 
 def _classify_rap_ddl(bq_sql: str) -> str:

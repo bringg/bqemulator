@@ -40,8 +40,14 @@ surfaces those errors via the standard pipeline.
 
 from __future__ import annotations
 
+import re
+
 import sqlglot
 from sqlglot import exp
+
+# A ``Create`` node needs the ``CREATE`` keyword in the text, so a statement
+# without it (every SELECT and DML) skips the parse.
+_CREATE_KEYWORD_RE = re.compile(r"\bCREATE\b", re.IGNORECASE)
 
 
 def rewrite_create_table_schema_ctas(bq_sql: str) -> str:
@@ -49,8 +55,11 @@ def rewrite_create_table_schema_ctas(bq_sql: str) -> str:
 
     Returns the input unchanged if SQLGlot cannot parse it (let
     downstream layers surface the error) or if no combined-form
-    create-table appears in the AST.
+    create-table appears in the AST. Returns it unchanged, without a
+    parse, when the text has no ``CREATE`` keyword.
     """
+    if _CREATE_KEYWORD_RE.search(bq_sql) is None:
+        return bq_sql
     try:
         tree = sqlglot.parse_one(bq_sql, read="bigquery")
     except Exception:  # noqa: BLE001 — let the translator surface the parse error

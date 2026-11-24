@@ -63,7 +63,7 @@ emulator. See [ADR 0030](../adr/0030-storage-read-avro-format.md).
 | JavaScript UDFs | ✅ |
 | Table-valued functions | ✅ |
 | Procedural scripting (DECLARE / BEGIN / END / IF / LOOP) | ✅ |
-| Time travel (`FOR SYSTEM_TIME AS OF`) | ✅ |
+| Time travel (`FOR SYSTEM_TIME AS OF`, opt-in with `BQEMU_AUTO_SNAPSHOTS=true`) | ✅ |
 | Table snapshots + CLONE | ✅ |
 | Materialized views | ✅ |
 | Row access policies (enforced) | ✅ |
